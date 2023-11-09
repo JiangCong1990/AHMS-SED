@@ -1,0 +1,4018 @@
+! --------------------------------------------------------
+! 2d overland + channel routing in domain scale
+! Qian, 2016.06
+! --------------------------------------------------------
+
+module module_rt_rt2d
+
+#ifdef MPP_LAND
+  USE module_mpp_land
+#endif
+  USE module_gw_gw2d_data, ONLY: gw2d
+  USE module_rt_rt2d_data, ONLY: rt2d
+  USE module_rt_data, ONLY: rt_domain 
+  USE module_namelist,ONLY: nlst_rt
+
+  implicit none
+
+#include "rt2d_field_include.inc"
+
+  contains
+
+
+  subroutine rt2d_ini(did, dt, dx)
+  ! to initialize 2D hydrological model
+  ! call rt2d_ini(did, nlst_rt(did)%dtrt, nlst_rt(did)dxrt0) in HYDRO_ini
+    implicit none
+
+      INTEGER, INTENT(IN) :: did
+      REAL   , INTENT(IN) :: dt    ! time interval for HYDRO, = nlst_rt(did)%dtrt 
+      REAL   , INTENT(IN) :: dx    ! resolution for HYDRO, = nlst_rt(did)%dxrt0 
+
+      REAL,    PARAMETER  :: condef   = 3.0E-4  ! saturated hydraulic conductivity in ocean
+      real,    parameter  :: thickdef = 200.0   ! aquifer thcikness for ocean 
+      real,    parameter  :: botinc   = 1.0     ! groundwater head >= rt2d(did)bot(i,j) + botinc
+
+      INTEGER :: i, j, k, nn
+      INTEGER :: ip, im, jp, jm
+      REAL    :: bankin, hlakein, banktmp
+      REAL    :: tarea, wlake, wriver, dbank, zhlake, zelev, wsf
+      REAL    :: maxdepth, elev_max 
+      REAL,   DIMENSION(:,:), ALLOCATABLE :: thickness  ! streambed thickness for subbasins
+      REAL,   DIMENSION(:,:), ALLOCATABLE :: roughness  ! Manning roughness for subbasins
+
+      INTEGER,DIMENSION(:),   ALLOCATABLE :: inbasin    ! inputed basin NO   
+      REAL,   DIMENSION(:,:), ALLOCATABLE :: hydparam   ! inputed hydrological parameters
+      INTEGER :: ifs, ife, jfs, jfe, ifdim, jfdim
+
+      ifs = 1
+      ife = rt2d(did)%ix
+      jfs = 1
+      jfe = rt2d(did)%jx
+      ifdim = ife - ifs + 1
+      jfdim = jfe - jfs + 1
+
+      rt2d(did)%dx = dx
+      rt2d(did)%dt = dt
+
+      ! initialization 
+      rt2d(did)%fwater       = 0.
+      rt2d(did)%fsat         = 0.
+      rt2d(did)%runoff       = 0.
+      rt2d(did)%precip       = 0.
+      rt2d(did)%evap         = 0.
+      rt2d(did)%streamflux   = 0.
+      rt2d(did)%istreamflux  = 0 
+      rt2d(did)%ac_precip    = 0.
+      rt2d(did)%ac_evap      = 0.
+      rt2d(did)%ac_pmewsf    = 0.
+      rt2d(did)%ac_roff_grnd = 0.
+      rt2d(did)%ac_infil_grnd = 0.
+      rt2d(did)%ac_drain_grnd = 0.
+      rt2d(did)%ac_ocnsf      = 0.
+      rt2d(did)%ac_fixsf      = 0.
+      rt2d(did)%tinfil        = 0.
+      rt2d(did)%sinfil        = 0.
+
+      if (nlst_rt(did)%INTERGWSFW .EQ. 1) then
+         rt2d(did)%cgiflux       = 0.
+         rt2d(did)%cuiflux       = 0.
+         rt2d(did)%cglflux       = 0.
+         rt2d(did)%rsat          = 0.
+         rt2d(did)%dvolgw        = 0.
+         rt2d(did)%volaq         = 0.d0  ! water storage in the soil below soil layers 
+         rt2d(did)%ac_cgi        = 0.
+         rt2d(did)%ac_cgl        = 0.
+         rt2d(did)%ac_cui        = 0.
+         rt2d(did)%ac_rsat_grnd  = 0.
+      endif
+
+      if (nlst_rt(did)%gwBaseSwCRT .EQ. 3) then
+         rt2d(did)%ac_ocngw  = 0.
+         rt2d(did)%ac_fixgw  = 0.
+      endif
+
+      ! Qian, temporary set for soil 
+      do j = 1, rt2d(did)%jx
+         do i = 1, rt2d(did)%ix
+            RT_DOMAIN(did)%SMCSATRT(i,j) = max(0.001,  RT_DOMAIN(did)%SMCSATRT(i,j))
+            RT_DOMAIN(did)%SUCSATRT(i,j) = max(0.001,  RT_DOMAIN(did)%SUCSATRT(i,j))
+            RT_DOMAIN(did)%BSWRT(i,j)    = max(0.001,  RT_DOMAIN(did)%BSWRT(i,j))
+            RT_DOMAIN(did)%HYCONDRT(i,j) = max(1.E-7,  RT_DOMAIN(did)%HYCONDRT(i,j)) 
+         end do
+      end do
+
+      ! elevation of coastal land points has to be above the elevation of surrounding ocean points
+      ! to avoid that ocean water intrudes
+      do j = 1, rt2d(did)%jx
+         jm = max(j-1, 1)
+         jp = min(j+1, rt2d(did)%jx)
+         do i = 1, rt2d(did)%ix
+            im = max(i-1, 1)
+            ip = min(i+1, rt2d(did)%ix)
+            elev_max = -9999.0
+            if (rt2d(did)%ltype(i,j) .ne. 0.) then
+               if (rt2d(did)%ltype(ip,j) .eq. 0) then 
+                  elev_max = max(rt2d(did)%elev(ip,j),elev_max)  
+               end if
+               if (rt2d(did)%ltype(ip,jp) .eq. 0) then 
+                  elev_max = max(rt2d(did)%elev(ip,jp),elev_max)
+               end if
+               if (rt2d(did)%ltype(i,jp) .eq. 0) then
+                  elev_max = max(rt2d(did)%elev(i,jp),elev_max)
+               end if
+               if (rt2d(did)%ltype(im,jp) .eq. 0) then
+                  elev_max = max(rt2d(did)%elev(im,jp),elev_max)
+               end if
+               if (rt2d(did)%ltype(im,j) .eq. 0) then
+                  elev_max = max(rt2d(did)%elev(im,j),elev_max)
+               end if
+               if (rt2d(did)%ltype(im,jm) .eq. 0) then
+                  elev_max = max(rt2d(did)%elev(im,jm),elev_max)
+               end if
+               if (rt2d(did)%ltype(i,jm) .eq. 0) then
+                  elev_max = max(rt2d(did)%elev(i,jm),elev_max)
+               end if
+               if (rt2d(did)%ltype(ip,jm) .eq. 0) then
+                  elev_max = max(rt2d(did)%elev(ip,jm),elev_max)
+               end if
+
+               if (rt2d(did)%elev(i,j) .lt. elev_max+0.5) then
+#ifdef MPP_LAND
+                 write(6,*) 'in Processor ', my_id
+#endif
+                 write(6,*) 'elevation of coastal point < elevation of surrounding ocean point(s)'
+                 write(6,*) 'coastal point: i = ', i, ',j = ', j, 'elevation = ', rt2d(did)%elev(i,j)
+                 write(6,*) 'reset its elevation, = ', elev_max+0.5
+                rt2d(did)%elev(i,j) = elev_max+0.5
+               end if
+
+            end if
+         end do
+      end do
+
+      ! ****** 2D Routing path ******
+      ! initialization for routing path
+      do j = 1, rt2d(did)%jx
+         do i = 1, rt2d(did)%ix
+
+            if (rt2d(did)%ltype(i,j) .eq. 0) then
+              rt2d(did)%disch(i,j) = 0.
+              rt2d(did)%width(i,j) = dx
+              rt2d(did)%fbed(i,j)  = 1.
+              rt2d(did)%bank(i,j)  = 0.
+            else
+               bankin = rt2d(did)%bank(i,j)  !!cong,20190422
+               rt2d(did)%bank(i,j) = min(30., max(0.5, bankin))  
+
+               banktmp = rt2d(did)%bank(i,j) * 0.7                ! Qian, assumed 70% stage in preprocessing
+               rt2d(did)%disch(i,j) = (banktmp/0.6)**(1./0.4)     !Cong
+!               rt2d(did)%bank(i,j) =  0.6*(rt2d(did)%disch(i,j)**0.4)
+!               rt2d(did)%bank(i,j) = min(30., max(0.5, rt2d(did)%bank(i,j)))
+               rt2d(did)%width(i,j) = 10.*(rt2d(did)%disch(i,j)**0.5)
+               rt2d(did)%width(i,j) = min(rt2d(did)%width(i,j), dx)
+
+               ! rt2d(did)%fbed(i,j)  = min(1., (rt2d(did)%width(i,j)/dx)**0.8)
+               ! rt2d(did)%fbed(i,j)  = min(1., (rt2d(did)%width(i,j)/dx)**0.7)
+               rt2d(did)%fbed(i,j)  = min(1., (rt2d(did)%width(i,j)/dx)**0.5)
+               !rt2d(did)%fbed(i,j)  = min(1., (rt2d(did)%width(i,j)/dx))
+            end if
+
+         end do
+      end do
+
+      ! initialization for water level in stream if not restart
+      ! initialization with restart file if restarts
+      if (nlst_rt(did)%rst_bi_in .eq. 0) then
+         do j = 1, rt2d(did)%jx
+            do i = 1, rt2d(did)%ix
+
+               if (rt2d(did)%ltype(i,j) .eq. 0) then                ! ocean grids
+                  hlakein = rt2d(did)%hlake(i,j)
+                  rt2d(did)%hlake(i,j) = hlakein 
+               else                                                 ! land grids inside/outside watershed
+                  hlakein = rt2d(did)%hlake(i,j)
+                  banktmp = rt2d(did)%bank(i,j)
+                  ! if inputed hlake > elevation, defined as lake grid
+                  if (hlakein - rt2d(did)%elev(i,j) .gt. 1.e-3 ) then  ! lake
+                     rt2d(did)%hlake(i,j) = hlakein
+                  else                                                 ! river
+                      rt2d(did)%hlake(i,j) = rt2d(did)%elev(i,j) - 0.1*banktmp ! 90% stage
+                     !rt2d(did)%hlake(i,j) = rt2d(did)%elev(i,j) - 0.4*banktmp ! 60% stage
+                     !rt2d(did)%hlake(i,j) = rt2d(did)%elev(i,j) - 0.9*banktmp ! 10% stage
+                  endif
+               endif
+
+            end do
+          end do
+      endif
+
+      ! ****** hydrological parameters  ******
+      ! hydparam(1,:) streambed thickness
+      ! hydparam(2,:) hydraulic conductivity of streambed 
+      ! hydparam(3,:) hydraulic conductivity out of streambed
+      ! hydparam(4,:) Manning roughness coefficient inside stream, currently used
+      ! hydparam(5,:) Manning roughness coefficient outside stream
+      open(67, file='./hydro_parameter.input', form="formatted")
+         read(67,*) nn  ! number of basin
+         do j = 1, 5    ! neglecting Comment Line 2~6
+            read(67,*)
+         end do
+         allocate(inbasin(nn))
+         allocate(hydparam(5,nn))
+         do k = 1, nn
+            read(67,*) inbasin(k), hydparam(:,k)
+         end do
+      close(67)
+
+      ! ****** Manning roughness  ******
+      ! hydparam(4): Manning roughness coefficient inside stream
+      ! hydparam(5): Manning roughness coefficient outside stream
+      do j = 1, rt2d(did)%jx
+         do i = 1, rt2d(did)%ix
+
+             do k = 1, nn
+                if (rt2d(did)%ielev(i,j) .eq. inbasin(k)) then
+                   rt2d(did)%rough(i,j) = hydparam(4,k)
+                   rt2d(did)%hycond_g(i,j)= hydparam(2,k)  !!cong,0520
+                   rt2d(did)%hycond_u(i,j)= hydparam(3,k)
+                   exit
+                endif
+             end do
+
+         end do
+      end do
+
+      ! ****** soil properity ******
+      ! reset for saturated hydraulic conductivity & porosity
+      do j = 1, rt2d(did)%jx
+         do i = 1, rt2d(did)%ix
+            rt2d(did)%poros(i,j)  = min(1.0,    RT_DOMAIN(did)%SMCSATRT(i,j))
+            rt2d(did)%hycond(i,j) = max(1.0E-7, RT_DOMAIN(did)%HYCONDRT(i,j))
+         end do
+      end do
+
+#ifdef MPP_LAND
+       call MPP_LAND_COM_REAL(rt2d(did)%elev,  ifdim, jfdim, 99)
+       call MPP_LAND_COM_REAL(rt2d(did)%bank,  ifdim, jfdim, 99)
+       call MPP_LAND_COM_REAL(rt2d(did)%sdep,  ifdim, jfdim, 99)
+       call MPP_LAND_COM_REAL(rt2d(did)%hlake, ifdim, jfdim, 99)
+       call MPP_LAND_COM_REAL(rt2d(did)%disch, ifdim, jfdim, 99)
+       call MPP_LAND_COM_REAL(rt2d(did)%width, ifdim, jfdim, 99)
+       call MPP_LAND_COM_REAL(rt2d(did)%fbed,  ifdim, jfdim, 99)
+       call MPP_LAND_COM_REAL(rt2d(did)%poros, ifdim, jfdim, 99)
+       call MPP_LAND_COM_REAL(rt2d(did)%hycond,ifdim, jfdim, 99)
+       call MPP_LAND_COM_REAL(rt2d(did)%hycond_g,ifdim, jfdim, 99)  !Cong
+       call MPP_LAND_COM_REAL(rt2d(did)%hycond_u,ifdim, jfdim, 99)  !Cong,0520
+#endif
+
+      ! ****** groundwater ******
+   IF (nlst_rt(did)%INTERGWSFW .EQ. 1) THEN
+      ! assign streambed thickness to sbedthick(1:ix,1:jx)  
+      do j = 1, rt2d(did)%jx
+         do i = 1, rt2d(did)%ix
+             do k = 1, nn
+                if (rt2d(did)%ielev(i,j) .eq. inbasin(k)) then
+                   rt2d(did)%sbedthick(i,j) = hydparam(1,k)
+                   exit
+                endif
+             end do
+         end do
+      end do
+
+      ! initialize rt2d(did)%hbeg using gw2d(did)%h after PreCycle spinup
+      if (nlst_rt(did)%GWBASESWCRT .eq. 3) then
+         if (nlst_rt(did)%GwPreCycles .gt. 0) then 
+            rt2d(did)%hbeg = gw2d(did)%h(1:rt2d(did)%ix,1:rt2d(did)%jx)
+         endif
+      endif
+
+      ! initialize lowest groundwater head (m), rt2d(did)%bot(i,j) 
+      ! initialize depth of groundwate head (m), rt2d(did)%zhead(i,j)
+      ! reset groundwater head
+      do j = 1, rt2d(did)%jx
+         do i = 1, rt2d(did)%ix
+               rt2d(did)%bot(i,j) = rt2d(did)%elev(i,j) - rt2d(did)%aqthick(i,j)
+
+               ! lower boundary for groundwater head
+               if (rt2d(did)%hbeg(i,j) .le. rt2d(did)%bot(i,j)+botinc) then         
+                  rt2d(did)%hbeg(i,j) = rt2d(did)%bot(i,j)+botinc
+               endif
+
+               ! upper boundary for groundwater head
+               ! If head is close to (or above elevation), 
+               ! if non-lake, equal to elevation exactly
+               ! if contact with lake water, set head as water level in lake
+!               if (rt2d(did)%hbeg(i,j) .ge. rt2d(did)%elev(i,j) - 1.E-3) then
+               if (rt2d(did)%hbeg(i,j)-rt2d(did)%elev(i,j) .GE. 1.E-2) then
+                  rt2d(did)%hbeg(i,j) = max(rt2d(did)%hlake(i,j), min(rt2d(did)%elev(i,j), rt2d(did)%hbeg(i,j)))
+               endif
+               rt2d(did)%zhead(i,j) = max(0., rt2d(did)%elev(i,j)-rt2d(did)%hbeg(i,j))
+         end do
+      end do
+      rt2d(did)%hend  = rt2d(did)%hbeg
+
+#ifdef MPP_LAND
+      call MPP_LAND_COM_REAL(rt2d(did)%sbedthick,  ifdim, jfdim, 99)
+      call MPP_LAND_COM_REAL(rt2d(did)%bot,        ifdim, jfdim, 99)
+      call MPP_LAND_COM_REAL(rt2d(did)%hbeg,       ifdim, jfdim, 99)
+      call MPP_LAND_COM_REAL(rt2d(did)%hend,       ifdim, jfdim, 99)
+      call MPP_LAND_COM_REAL(rt2d(did)%zhead,      ifdim, jfdim, 99)
+#endif
+
+      ! Reset groundwater head after connection with hlake
+      if (nlst_rt(did)%GWBASESWCRT .eq. 3) then
+         gw2d(did)%ho   = rt2d(did)%hbeg
+         gw2d(did)%h    = gw2d(did)%ho
+         gw2d(did)%bot  = rt2d(did)%bot
+#ifdef MPP_LAND
+         call MPP_LAND_COM_REAL(gw2d(did)%ho, ifdim, jfdim, 99)
+         call MPP_LAND_COM_REAL(gw2d(did)%h,  ifdim, jfdim, 99)
+         call MPP_LAND_COM_REAL(gw2d(did)%bot,ifdim, jfdim, 99) 
+#endif         
+      endif
+
+      ! Initialize for saturated-soil fraction
+      call fsat_cal(did) 
+
+      ! Initialize for soil moisture 
+!QIANXIA      if (nlst_rt(did)%rst_bi_in .eq. 1 .or. nlst_rt(did)%rst_typ .eq. 1) then
+      if (nlst_rt(did)%rst_bi_in .eq. 1) then
+         ! Initialize for soil moisture from restart file
+         ! RT_DOMAIN(did)%SMCRT(ixrt,jxrt,nsoil) should readin from restart file
+         ! currently only RT_DOMAIN(did)%SMC(ix,jx,nsoil) is readin in HYDRO_rst_in(did)
+         RT_DOMAIN(DID)%SMCRT(:,:,:) = RT_DOMAIN(DID)%SMC(:,:,:)
+      else
+         ! Initialize for soil moisture based on groundwater head
+         ! and also change initial soil moisture in soil hydrology model
+         call ini_smois(did)
+      endif
+
+      ! Initialize for water storage in unsaturated soil zone and groundwater storage  
+      call ini_water_storage(did)
+
+   ENDIF
+
+      ! ****** grid type ******
+      ! find out the ocean points contacted with watershed
+      ! ltype(i,j) =  1, land point in watershed
+      ! ltype(i,j) = -1, land point out of watershed
+      ! ltype(i,j) =  0, ocean point uncontacted with watershed
+      ! ltype(i,j) =  2, ocean point contacted with watershed 
+      do j = 1, rt2d(did)%jx
+         jm = max(j-1, 1)
+         jp = min(j+1, rt2d(did)%jx)
+         do i = 1, rt2d(did)%ix
+            im = max(i-1, 1)
+            ip = min(i+1, rt2d(did)%ix)
+            if ((rt2d(did)%ltype(i,j)  .eq. 0) .and.  ( &
+                (rt2d(did)%ltype(ip,j) .eq. 1) .or. (rt2d(did)%ltype(ip,jp) .eq. 1) .or.&
+                (rt2d(did)%ltype(i,jp) .eq. 1) .or. (rt2d(did)%ltype(im,jp) .eq. 1) .or.&
+                (rt2d(did)%ltype(im,j) .eq. 1) .or. (rt2d(did)%ltype(im,jm) .eq. 1) .or.&
+                (rt2d(did)%ltype(i,jm) .eq. 1) .or. (rt2d(did)%ltype(ip,jm) .eq. 1)     &
+              )) then
+
+               rt2d(did)%ltype(i,j) = 2  
+
+            endif
+         end do
+      end do
+#ifdef MPP_LAND
+      call MPP_LAND_COM_INTEGER(rt2d(did)%ltype, ifdim, jfdim, 99)
+#endif
+
+      ! ****** surface water ******
+      ! initialize for surface water storage, rt2d(did)%w_sf(i,j)
+      do j = 1, rt2d(did)%jx
+         do i = 1, rt2d(did)%ix
+            wriver = 0.0
+            wlake  = 0.0
+            if (rt2d(did)%ltype(i,j) .eq. 1) then
+               dbank  = rt2d(did)%bank(i,j)
+               zhlake = rt2d(did)%hlake(i,j)
+               zelev  = rt2d(did)%elev(i,j)
+
+               wlake  = max(zhlake,zelev)-zelev
+               wriver = (min(zhlake,zelev)-(zelev-dbank)) * rt2d(did)%fbed(i,j)
+            endif
+            rt2d(did)%w_sf(i,j) = wlake + wriver 
+         end do
+      end do
+
+      ! initialize for surface water fraction per grid
+      call fwater_cal(did)
+
+      RT_DOMAIN(did)%SH2OWGT = 1.0
+
+      deallocate(inbasin)
+      deallocate(hydparam)
+    RETURN
+  end subroutine rt2d_ini
+
+! ------------------------------------------------------------
+  subroutine rt2d_allocate(did, ix, jx, ixrt, jxrt, nsoil)
+    implicit none
+
+      INTEGER, INTENT(IN) :: did       ! domain number
+      INTEGER, INTENT(IN) :: ix        ! number of i-grid, from WRF
+      INTEGER, INTENT(IN) :: jx        ! number of j-grid, from WRF
+      INTEGER, INTENT(IN) :: ixrt      ! number of i-grid for Hydro domain
+      INTEGER, INTENT(IN) :: jxrt      ! number of j-grid for Hydro domain
+      INTEGER, INTENT(IN) :: nsoil     ! number of soil layer, from WRF
+
+      INTEGER :: ntran
+      IF (rt2d(did)%allo_status .eq. 1) RETURN
+      rt2d(did)%allo_status = 1
+
+      rt2d(did)%ix  = ixrt
+      rt2d(did)%jx  = jxrt
+ 
+      ntran = nlst_rt(did)%ntran
+
+#ifdef MPP_LAND
+      if(down_id == -1)  then !  if south border
+       rt2d(did)%jts = 1
+      else
+       rt2d(did)%jts = 2
+      endif
+
+      if(up_id == -1)    then !if north border
+        rt2d(did)%jte = jxrt
+      else
+        rt2d(did)%jte = jxrt-1
+      endif
+
+      if(left_id == -1)  then !if west border
+        rt2d(did)%its = 1
+      else
+        rt2d(did)%its = 2
+      endif
+
+      if(right_id == -1) then ! if east border
+        rt2d(did)%ite = ixrt
+      else
+        rt2d(did)%ite = ixrt-1
+      endif
+#else
+      rt2d(did)%its   = 1
+      rt2d(did)%ite   = ixrt
+      rt2d(did)%jts   = 1
+      rt2d(did)%jte   = jxrt
+#endif
+
+#ifdef HYDRO_D
+#ifdef MPP_LAND
+     write(6,*) "  rt2d_allocate: Processor = ", my_id
+#endif
+     write(6,*) "  rt2d_allocate: ix   = ", ix
+     write(6,*) "  rt2d_allocate: jx   = ", jx
+     write(6,*) "  rt2d_allocate: ixrt = ", ixrt
+     write(6,*) "  rt2d_allocate: jxrt = ", jxrt
+     write(6,*) "  rt2d_allocate: nsoil = ", nsoil
+     write(6,*) "  rt2d_allocate: ntran = ", ntran 
+#endif
+
+!     allocate land surface grid variables, rt_domain%array(ix,jx)
+      allocate( rt_domain(did)%TERRAIN (IX,JX) )         ! topography, m
+      allocate( rt_domain(did)%dist_lsm(IX,JX,9) )       ! distance in 8 directions (m) and grid area (m2)
+      allocate( rt_domain(did)%lat_lsm (IX,JX) )         ! lsm latitude, degree
+      allocate( rt_domain(did)%lon_lsm (IX,JX) )         ! lsm longitude, degree
+      allocate( rt_domain(did)%STC     (IX,JX,NSOIL) )   ! soil temperature, K
+      allocate( rt_domain(did)%SMC     (IX,JX,NSOIL) )   ! soil moisture, m3/m3 
+      allocate( rt_domain(did)%SICE    (IX,JX,NSOIL) )   ! ice volumetric content, m3/m3
+      allocate( rt_domain(did)%SH2OX   (IX,JX,NSOIL) )   ! liquid volumetric content, m3/m3
+      allocate( rt_domain(did)%LKSAT   (IX,JX) )         ! saturated hydraulic conductivity, m/s 
+      allocate( rt_domain(did)%SMCMAX1 (IX,JX) )         ! porosity, m3/m3 
+      allocate( rt_domain(did)%SMCWLT1 (IX,JX) )         ! wilting point, m3/m3
+      allocate( rt_domain(did)%SMCREF1 (IX,JX) )         ! field capacity, m3/m3
+      allocate( rt_domain(did)%SUCSAT1 (IX,JX) )         ! saturated soil potential (suction), m 
+      allocate( rt_domain(did)%BSW1    (IX,JX) )         ! exponential index, i.e., B
+      allocate( rt_domain(did)%VEGTYP  (IX,JX) )         ! landuse type, category
+      allocate( rt_domain(did)%SOILTYP (IX,JX) )         ! soil type, category
+      allocate( rt_domain(did)%SLDPTH  (NSOIL) )         ! thickness of soil layer, m
+      allocate( rt_domain(did)%SFCHEADRT (IX,JX) )       ! surface water head, mm
+      allocate( rt_domain(did)%INFXSRT   (IX,JX) )       ! surface runoff, mm
+      allocate( rt_domain(did)%SOLDRAIN  (IX,JX) )       ! soil drainage to/from groundwater, mm
+      ! added by Qian, for 2D-gwstep routing & 2D-overland.channel routing
+      allocate( rt_domain(did)%SOLINFL   (IX,JX) )       ! soil infiltration, mm
+      allocate( rt_domain(did)%gwhead    (IX,JX) )       ! groundwater head, m
+      allocate( rt_domain(did)%PRECIPRT  (IX,JX) )       ! preciptation, mm
+      allocate( rt_domain(did)%EVAPRT    (IX,JX) )       ! evaporation, mm
+
+      rt_domain(did)%TERRAIN     = 0.0
+      rt_domain(did)%dist_lsm    = 0.0
+      rt_domain(did)%lat_lsm     = 0.0
+      rt_domain(did)%lon_lsm     = 0.0
+      rt_domain(did)%STC         = 282.0
+      rt_domain(did)%SMC         = 0.25
+      rt_domain(did)%SICE        = 0.
+      rt_domain(did)%SH2OX       = rt_domain(did)%SMC
+      rt_domain(did)%LKSAT       = 0.0
+      rt_domain(did)%SMCMAX1     = 0.0
+      rt_domain(did)%SMCWLT1     = 0.0
+      rt_domain(did)%SMCREF1     = 0.0
+      rt_domain(did)%SUCSAT1     = 0.0
+      rt_domain(did)%BSW1        = 0.0
+      rt_domain(did)%VEGTYP      = 0
+      rt_domain(did)%SOILTYP     = 0
+      rt_domain(did)%SLDPTH      = 0.0
+      rt_domain(did)%SFCHEADRT   = 0.0
+      rt_domain(did)%INFXSRT     = 0.0
+      rt_domain(did)%SOLDRAIN    = 0.0
+      rt_domain(did)%SOLINFL     = 0.
+      rt_domain(did)%gwhead      = 0.
+      rt_domain(did)%PRECIPRT    = 0.
+      rt_domain(did)%EVAPRT      = 0. 
+
+!     allocate aggergate/disaggregate array 
+      allocate( rt_domain(did)%SH2OAGGRT    (NSOIL) )      ! aggregate for SH20  
+      allocate( rt_domain(did)%STCAGGRT     (NSOIL) )      ! aggregate for STC
+      allocate( rt_domain(did)%SMCAGGRT     (NSOIL) )      ! aggregate for SMC
+      allocate( rt_domain(did)%INFXSAGGRT   (IXRT,JXRT) )  ! aggregate for INFXSRT
+!      allocate( rt_domain(did)%GWHEADAGGRT  (IXRT,JXRT) )  ! aggregate for gwhead
+      ! other aggerate factors:
+      ! rt_domain(did)%SFCHEADAGGRT                        ! aggregate for SFCHEADRT
+      rt_domain(did)%SH2OAGGRT   = 0.
+      rt_domain(did)%STCAGGRT    = 0.
+      rt_domain(did)%SMCAGGRT    = 0.
+      rt_domain(did)%INFXSAGGRT  = 0.
+!      rt_domain(did)%GWHEADAGGRT = 0.
+
+!     allocate for rt_domain%array(ixrt,jxrt)
+      allocate( rt_domain(did)%dist         (IXRT,JXRT,9) )       ! distance in 8 directions (m) and grid area (m2)
+      allocate( rt_domain(did)%SMCRT        (IXRT,JXRT,NSOIL) )   ! liquid volumetric content, m3/m3
+      allocate( rt_domain(did)%SICERT        (IXRT,JXRT,NSOIL))   ! iced volumetric content, m3/m3
+      allocate( rt_domain(did)%SH2OWGT      (IXRT,JXRT,NSOIL) )   ! weight for SH20, m3/m3
+      allocate( rt_domain(did)%SMCMAXRT     (IXRT,JXRT,NSOIL) )   ! efficient porosity,  m3/m3
+      allocate( rt_domain(did)%SMCWLTRT     (IXRT,JXRT,NSOIL) )   ! wilting point, m3/m3
+      allocate( rt_domain(did)%SMCREFRT     (IXRT,JXRT,NSOIL) )   ! field capactiy, m3/m3
+      allocate( rt_domain(did)%SUCSATRT     (IXRT,JXRT) )         ! saturated soil potential (suction), m
+      allocate( rt_domain(did)%SMCSATRT     (IXRT,JXRT) )         ! porosity, m3/m3
+      allocate( rt_domain(did)%BSWRT        (IXRT,JXRT) )         ! Clapp and Hornberger 'b'
+      allocate( rt_domain(did)%HYCONDRT     (IXRT,JXRT) )         ! saturated hydraulic conductivity, m/s
+      allocate( rt_domain(did)%SOILTYPRT    (IXRT,JXRT) )         ! soil type, category
+      allocate( rt_domain(did)%ELRT         (IXRT,JXRT) )         ! topography, m
+      allocate( rt_domain(did)%SOLDEPRT     (IXRT,JXRT) )         ! soil depth, m 
+      allocate( rt_domain(did)%SOXRT        (IXRT,JXRT) )
+      allocate( rt_domain(did)%SOYRT        (IXRT,JXRT) )
+      allocate( rt_domain(did)%SO8RT        (IXRT,JXRT,8) )
+      allocate( rt_domain(did)%SO8RT_D      (IXRT,JXRT,3) )
+      allocate( rt_domain(did)%INFXSUBRT    (IXRT,JXRT) )         ! subgrid runoff, mm 
+      allocate( rt_domain(did)%INFXSWGT     (IXRT,JXRT) )         ! subgrid runoff weight 
+      allocate( rt_domain(did)%SFCHEADSUBRT (IXRT,JXRT) )         ! subgrid surface head, mm
+      allocate( rt_domain(did)%RETDEPRT     (IXRT,JXRT) )         ! retention depth
+      allocate( rt_domain(did)%RETDEPRTFAC  (IXRT,JXRT) )         ! calibraton factor for retention depth
+      allocate( rt_domain(did)%OVROUGHRT    (IXRT,JXRT) )         ! overland roughness
+      allocate( rt_domain(did)%OVROUGHRTFAC (IXRT,JXRT) )         ! calibration factor for roughness
+      allocate( rt_domain(did)%LKSATRT      (IXRT,JXRT) )         ! saturated hydraulic conductivity
+      allocate( rt_domain(did)%LKSATFAC     (IXRT,JXRT) )         ! calibration for LKSAT 
+
+      rt_domain(did)%dist         = 0.
+      rt_domain(did)%SMCRT        = 0.
+      rt_domain(did)%SICERT       = 0. 
+      rt_domain(did)%SH2OWGT      = 1.
+      rt_domain(did)%SMCMAXRT     = 0. 
+      rt_domain(did)%SMCWLTRT     = 0.
+      rt_domain(did)%SMCREFRT     = 0.
+      rt_domain(did)%SUCSATRT     = 0.
+      rt_domain(did)%SMCSATRT     = 0.
+      rt_domain(did)%BSWRT        = 0.
+      rt_domain(did)%HYCONDRT     = 0.
+      rt_domain(did)%SOILTYPRT    = 0
+      rt_domain(did)%ELRT         = 0.
+      rt_domain(did)%SOLDEPRT     = 0.
+      rt_domain(did)%SOXRT        = 0.
+      rt_domain(did)%SOYRT        = 0.
+      rt_domain(did)%SO8RT        = 0.
+      rt_domain(did)%SO8RT_D      = 0.
+      rt_domain(did)%INFXSUBRT    = 0.
+      rt_domain(did)%INFXSWGT     = 0.
+      rt_domain(did)%SFCHEADSUBRT = 0.
+      rt_domain(did)%RETDEPRT     = 0.
+      rt_domain(did)%RETDEPRTFAC  = 0.
+      rt_domain(did)%OVROUGHRT    = 0.
+      rt_domain(did)%OVROUGHRTFAC = 0.
+      rt_domain(did)%LKSATRT      = 0.
+      rt_domain(did)%LKSATFAC     = 1.
+
+!     allocate for rt2d%array(ixrt,jxrt)
+      allocate(rt2d(did)%ltype(ixrt,jxrt))        ! land type, 1: land within basin;
+                                                  !           -1: land outside basin;
+                                                  !            0: water not in contact with basin
+                                                  !            2: water in contact with  basin
+      allocate(rt2d(did)%ielev(ixrt,jxrt))        ! subbasin, category
+      allocate(rt2d(did)%elev(ixrt,jxrt))         ! hydrologic topography, m
+      allocate(rt2d(did)%sdelev(ixrt,jxrt))       ! standard deviation of elevation,(-)
+      allocate(rt2d(did)%hlake(ixrt,jxrt))        ! water level elevation, m
+      allocate(rt2d(did)%bank(ixrt,jxrt))         ! river/lake depth, m
+      allocate(rt2d(did)%sdep(ixrt,jxrt))         ! storage depth, m
+      allocate(rt2d(did)%width(ixrt,jxrt))        ! stream width, m
+      allocate(rt2d(did)%fwater(ixrt,jxrt))       ! fractional water area, m2/m2
+      allocate(rt2d(did)%fsat(ixrt,jxrt))         ! fractional saturated area, m2/m2
+      allocate(rt2d(did)%fbed(ixrt,jxrt))         ! fractional streambed area, m2/m2
+      allocate(rt2d(did)%rough(ixrt,jxrt))        ! Manning roughness coefficient
+      allocate(rt2d(did)%hycond(ixrt,jxrt))       ! saturated hydraulic conductivity, m/s
+      allocate(rt2d(did)%hycond_g(ixrt,jxrt))       ! saturated hydraulic conductivity, m/s Cong,
+      allocate(rt2d(did)%hycond_u(ixrt,jxrt))       ! saturated hydraulic conductivity, m/s Cong,
+      allocate(rt2d(did)%poros(ixrt,jxrt))        ! porosity, m3/m3
+      allocate(rt2d(did)%precip(ixrt,jxrt))       ! precipitation, m/s
+      allocate(rt2d(did)%evap(ixrt,jxrt))         ! evaporation, m/s
+      allocate(rt2d(did)%runoff(ixrt,jxrt))       ! infiltration excess runoff, m/s
+      allocate(rt2d(did)%streamflux(ixrt,jxrt))   ! stream flux in grid, m3/s
+      allocate(rt2d(did)%istreamflux(ixrt,jxrt))  ! stream flux direction, 1 - 8
+      allocate(rt2d(did)%disch(ixrt,jxrt))        ! running mean streamflux throungh cell, m3/s
+      allocate(rt2d(did)%tinfil(ixrt,jxrt))       ! soil infiltration, m/s (+ to soil)
+      allocate(rt2d(did)%sinfil(ixrt,jxrt))       ! soil drainage into aquifer, m/s (+ to aquifer)
+
+
+      rt2d(did)%ltype       = 0
+      rt2d(did)%ielev       = 0
+      rt2d(did)%elev        = 0.
+!!Cong,20190715
+      rt2d(did)%sdelev      =0.
+      rt2d(did)%hlake       = 0.
+      rt2d(did)%bank        = 0.
+      rt2d(did)%sdep        = 0.
+      rt2d(did)%width       = 0.
+      rt2d(did)%fwater      = 0.
+      rt2d(did)%fsat        = 0.
+      rt2d(did)%fbed        = 0.
+      rt2d(did)%rough       = 0.
+      rt2d(did)%hycond      = 0.
+!!cong,
+      rt2d(did)%hycond_g    = 0.  
+      rt2d(did)%hycond_u    = 0.
+      rt2d(did)%poros       = 0.
+      rt2d(did)%precip      = 0.
+      rt2d(did)%evap        = 0.
+      rt2d(did)%runoff      = 0.
+      rt2d(did)%streamflux  = 0.
+      rt2d(did)%istreamflux = 0
+      rt2d(did)%disch       = 0.
+      rt2d(did)%sinfil      = 0.
+      rt2d(did)%tinfil      = 0.
+
+
+      if (nlst_rt(did)%INTERGWSFW .EQ. 1) then
+         allocate(rt2d(did)%rsat(ixrt,jxrt))      ! saturation excess runoff, m/s
+         allocate(rt2d(did)%cgiflux(ixrt,jxrt))   ! cell-mean flux between stream and aquifer, m/s
+         allocate(rt2d(did)%cuiflux(ixrt,jxrt))   ! cell-mean flux, stream -> unsaturated -> aquifer, m/s
+         allocate(rt2d(did)%cglflux(ixrt,jxrt))   ! cell-mean flux between lake and aquifer, m/s
+         allocate(rt2d(did)%dvolgw(ixrt,jxrt))    ! cell-mean change of groundwater volume at one timestep, m
+         allocate(rt2d(did)%volaq(ixrt,jxrt))     ! cell-mean change of water storage in aquifer, m
+         allocate(rt2d(did)%hbeg(ixrt,jxrt))      ! groundwater head at the beginning of timestep
+         allocate(rt2d(did)%hend(ixrt,jxrt))      ! groundwater head at the end of timestep
+         allocate(rt2d(did)%zhead(ixrt,jxrt))     ! depth of groundwater head below groundwater surface, m (>= 0) 
+         allocate(rt2d(did)%bot(ixrt,jxrt))       ! lowest groundwater head, m
+         allocate(rt2d(did)%aqthick(ixrt,jxrt))   ! unconfined aquifer thickness, m 
+         allocate(rt2d(did)%sbedthick(ixrt,jxrt)) ! thickness of streambed, m
+         rt2d(did)%rsat        = 0.
+         rt2d(did)%cgiflux     = 0.
+         rt2d(did)%cuiflux     = 0.
+         rt2d(did)%cglflux     = 0.
+         rt2d(did)%dvolgw      = 0.
+         rt2d(did)%volaq       = 0.d0
+         rt2d(did)%hbeg        = 0.
+         rt2d(did)%hend        = 0.
+         rt2d(did)%zhead       = 0.
+         rt2d(did)%bot         = 0.
+         rt2d(did)%aqthick     = 0.
+         rt2d(did)%sbedthick   = 100.
+      endif
+
+      if ( nlst_rt(did)%ntran .gt. 0) then
+#ifdef MPP_LAND
+         if (my_id .eq. IO_id) then
+#endif
+         allocate(rt2d(did)%atran(2,2,ntran))     ! coordinates (lon,lat) of two ending points in transects 
+         allocate(rt2d(did)%xtran(2,ntran))       ! x-grid of two points in transects
+         allocate(rt2d(did)%ytran(2,ntran))       ! y-grid of two points in transects
+         allocate(rt2d(did)%ncross(ntran))        ! number of vectors crossing correspoing transect
+         allocate(rt2d(did)%itran(500,ntran))     
+         allocate(rt2d(did)%jtran(500,ntran))
+         allocate(rt2d(did)%ktran(500,ntran))
+         allocate(rt2d(did)%fluxtran(ntran))      ! flux of specified transects
+         allocate(rt2d(did)%fluxtranav(ntran))    ! averaging flux of specified transects
+         rt2d(did)%atran    = 0.
+         rt2d(did)%xtran    = 0.
+         rt2d(did)%ytran    = 0.
+         rt2d(did)%ncross   = 0
+         rt2d(did)%itran    = 0
+         rt2d(did)%jtran    = 0
+         rt2d(did)%ktran    = 0
+         rt2d(did)%fluxtran = 0.
+         rt2d(did)%fluxtranav = 0.
+         rt2d(did)%count_flowout = 0
+#ifdef MPP_LAND
+         endif
+#endif
+      endif
+
+      ! allocate for accmulation arrays
+      allocate(rt2d(did)%w_sf(ixrt,jxrt))         ! surface water storage, m
+      allocate(rt2d(did)%ac_precip(ixrt,jxrt))    ! accumulated precipitation, m
+      allocate(rt2d(did)%ac_evap(ixrt,jxrt))      ! accumulated evaporation, m
+      allocate(rt2d(did)%ac_pmewsf(ixrt,jxrt))    ! accumulated p-e over water surface, m
+      allocate(rt2d(did)%ac_roff_grnd(ixrt,jxrt)) ! accumulated surface runof f & sub-surface runoff at soil surface, m
+      allocate(rt2d(did)%ac_fixsf(ixrt,jxrt))     ! accumulated water to fix surface water level, m3
+      allocate(rt2d(did)%ac_ocnsf(ixrt,jxrt))     ! accumulated surface water into ocean, m3
+      allocate(rt2d(did)%ac_infil_grnd(ixrt,jxrt))  ! accumulated infiltration at soil surface, m
+      allocate(rt2d(did)%ac_drain_grnd(ixrt,jxrt))  ! accumulated soil drainage, m
+
+      rt2d(did)%w_sf          = 0.
+      rt2d(did)%ac_precip     = 0.
+      rt2d(did)%ac_evap       = 0.
+      rt2d(did)%ac_pmewsf     = 0.
+      rt2d(did)%ac_roff_grnd  = 0.
+      rt2d(did)%ac_fixsf      = 0.
+      rt2d(did)%ac_ocnsf      = 0.
+      rt2d(did)%ac_infil_grnd = 0.
+      rt2d(did)%ac_drain_grnd = 0.
+
+
+      if (nlst_rt(did)%INTERGWSFW .EQ. 1) then
+         allocate(rt2d(did)%w_us(ixrt,jxrt))           ! water storage in unsaturated soil, m
+         allocate(rt2d(did)%w_gw(ixrt,jxrt))           ! water storage in groundwater, m 
+         allocate(rt2d(did)%ac_rsat_grnd(ixrt,jxrt))   ! accumulated saturation-excess runoff at soil surface, m
+         allocate(rt2d(did)%ac_cgi(ixrt,jxrt))         ! accumulated cgiflux*dt, m
+         allocate(rt2d(did)%ac_cgl(ixrt,jxrt))         ! accumulated cglflux*dt, m
+         allocate(rt2d(did)%ac_cui(ixrt,jxrt))         ! accumulated cuiflux*dt, m
+         rt2d(did)%w_us      = 0.
+         rt2d(did)%w_gw      = 0.
+         rt2d(did)%ac_cgi    = 0.
+         rt2d(did)%ac_cgl    = 0.
+         rt2d(did)%ac_cui    = 0.
+         rt2d(did)%ac_rsat_grnd  = 0.
+      endif
+
+      if ((nlst_rt(did)%gwBaseSwCRT .EQ. 3) .OR. (nlst_rt(did)%INTERGWSFW .EQ. 1))then
+         allocate(rt2d(did)%ac_fixgw(ixrt,jxrt))       ! accumulated water to fix groundwater, m3
+         rt2d(did)%ac_fixgw = 0.
+      endif
+
+      if (nlst_rt(did)%gwBaseSwCRT .EQ. 3) then
+         allocate(rt2d(did)%ac_ocngw(ixrt,jxrt))       ! accumulated groundwater to ocean,m3
+         rt2d(did)%ac_ocngw  = 0.
+      endif
+
+    RETURN
+  end subroutine rt2d_allocate
+
+! ------------------------------------------------------------
+  subroutine OverlandChannelRouting(ix,      jx,         dgrid       &
+                                   ,ltype,   elev                    &
+                                   ,runoff,  fwater,     fbed        &
+                                   ,fsat,    precip,     evap        &        
+                                   ,bank,    width,      rough       &        
+                                   ,hlake,   streamflux, istreamflux &
+                                   ,enegsub, totosub,    istep       &
+                                   ,dt,      isub,       nsub        &
+                                   ,method  &
+                                   ,flx_ocn, flx_fix,    rsat        &
+                                   ,cgiflux, cuiflux,    cglflux,    &
+                                   sdep )
+                                  
+
+! Record of revisions:
+! modified by Qian XIA, 2016.06, coupled with WRF
+! modified by limin, 2010
+
+! Purpose:
+! updates surface water (rivers/lakes) due to horizontal flux between 
+! adjacent cells, and local sources (runoff, cgiflux, cglflux).
+
+! Description:
+! flow in each grid can be 8 quadrants.
+! Currently, there are 3 methods: channel_shepherd, channel_kmatinv, channel_sparse 
+! 
+! Numerical method 1: shepherd
+!	after John Shepherd preprint (Uni. Southampton)
+!	Iterative(SUR), implicit in central point with surrounding hlake 
+! 	values from previous iteration
+! Numerical method 2: matinv
+!	Implicit with contributions from all surrounding points
+!	Matrix soles by basic Gaussian elimination (linsolvehyd)
+! Numerical method 3: sparse
+!	As matinv but using sparse solver linbcg (Numerical Recipes),
+!	and row-indexed sparse storage method 
+
+
+  implicit none
+  
+    INTEGER, INTENT(IN) :: ix, jx       !number of grid in X and Y
+    REAL,    INTENT(IN) :: dgrid        !resolution, m
+    REAL,    INTENT(IN) :: dt           !timestep interval, s
+    INTEGER, INTENT(IN) :: istep        !time step  
+    INTEGER, INTENT(IN) :: isub         !current sub-timestep index
+    INTEGER, INTENT(IN) :: nsub         !last sub-timestep index
+    INTEGER, INTENT(IN) :: method       !numerical methods 
+                                        !method=1, shepherd 
+                                        !method=2, matinv
+                                        !method=3, sparse
+    REAL,    INTENT(OUT) :: enegsub     !total fix for stream, m3/s
+    REAL,    INTENT(OUT) :: totosub     !total streamflux from land to ocean, m3/s
+
+    INTEGER, INTENT(IN), DIMENSION(ix, jx) :: &
+                         ltype          !land surface type
+
+    REAL,    INTENT(IN), DIMENSION(ix, jx) :: &
+                         elev        &  !elevation, m
+                        ,runoff      &  !infiltration excess runoff, m/s
+                        ,fwater      &  !fractional area of water, m2/m2
+                        ,fbed        &  !fractional area of streambed, m2/m2
+                        ,fsat        &  !fractional saturated area, m2/m2
+                        ,precip      &  !preciptation, m/s
+                        ,evap        &  !total evaporation + transpiration, m/s
+                        ,bank        &  !depth of streambed below local surface, m
+                        ,sdep        &  !storage depth, m
+                        ,width       &  !river width, river width, mm
+                        ,rough          !manning roughness coefficient 
+
+    REAL,    INTENT(INOUT), DIMENSION(ix, jx) :: &
+                         hlake       &  !elevation of river/lake water surface, m 
+                        ,streamflux     !stream flux out of cell, m3/s
+
+    INTEGER, INTENT(INOUT), DIMENSION(ix, jx) :: &
+                         istreamflux    !quadrant for streamflux, 1-8
+
+    REAL,    INTENT(OUT),   DIMENSION(ix, jx)    :: &                 
+                         flx_ocn,    &  ! flow into ocean in grid, m3/s
+                         flx_fix        ! flux to fix hlake, m3/s              
+
+    REAL, OPTIONAL, INTENT(IN), DIMENSION(ix, jx) :: &
+                         rsat        &  !saturation excess runoff, m/s
+                        ,cgiflux     &  !cell-averaging flux, streams <-> groundwater, m/s
+                        ,cuiflux     &  !cell-averaging flux, streams -> unsaturated -> groundwater, m/s
+                        ,cglflux        !cell-averaging flux, lake <-> groundwater, m/s
+ 
+!   LOCAL VARIABLES
+    REAL,    PARAMETER :: slopecrit = 1.E-20          ! slope ctiterion
+    REAL,    PARAMETER :: depmax    = 40.             ! maximum flow depth, m
+
+    INTEGER, SAVE, ALLOCATABLE :: indij(:,:,:)
+    INTEGER, SAVE, ALLOCATABLE :: ijspa(:)
+!C.Jiang,2019.10
+    REAL, SAVE, ALLOCATABLE :: hlake_ocean(:,:)
+    REAL, SAVE, ALLOCATABLE :: hlakeprev1(:,:)
+    REAL, SAVE, ALLOCATABLE :: hlakeprev2(:,:)
+
+    INTEGER :: i, j, k, n, i2, j2, n2, koff
+    INTEGER :: m, m2, itmax
+    INTEGER :: niter, itol, itlin, iter
+    INTEGER, SAVE :: iit
+
+    REAL    :: rimp
+    REAL    :: zloctot, dtot, dtoa, tareal, dtmp
+    REAL    :: zsource, sabsi, zz,                          &
+               zdepr, zwidr, zcrosr, zdepl, zwidl, zcrosl,  &
+               zrough, powslope, powconst, zf, zs, f , sabs,hsdep
+    REAL(kind=8) :: tol, errlin,zwei     
+    
+    REAL,   DIMENSION(8)                :: dists, dista
+    REAL,   DIMENSION(ix*jx)            :: zdt
+    REAL,   DIMENSION(ix,jx)            :: darea,     &
+                                           dx,        &
+                                           dy
+    REAL,   DIMENSION(ix,jx)            :: hlakeprev, &
+                                           hlaker,    &
+                                           zlocal,    &
+                                           work
+
+    REAL,   DIMENSION(ix,jx,4)          :: zfstora,   &
+                                           zfstorb 
+   
+    REAL,   DIMENSION(:,:), ALLOCATABLE :: za, zb        ! shepherd
+    REAL,   DIMENSION(:,:), ALLOCATABLE :: arr           ! matinv
+    REAL,   DIMENSION(:),   ALLOCATABLE :: rhs, vec      ! matinv/sparse
+    REAL,   DIMENSION(:),   ALLOCATABLE :: elspa         ! sparse
+    REAL(kind=8), DIMENSION(:),   ALLOCATABLE :: vec_r8  ! sparse 
+
+    INTEGER :: its, ite, jts, jte
+
+    ! anticlockwise from E
+    INTEGER, DIMENSION(8) :: iqq, jqq, kop
+    DATA iqq/1, 1, 0, -1, -1, -1,  0,  1/
+    DATA jqq/0, 1, 1,  1,  0, -1, -1, -1/
+    DATA kop/5, 6, 7,  8,  1,  2,  3,  4/     
+
+    INTEGER :: NMAX, nij
+    NMAX = ix * jx * 9 + 2
+    nij  = ix * jx
+
+    ! ALLOCATE 
+    if (method .eq. 1) then       ! shepherd 
+       allocate(za(ix,jx))
+       allocate(zb(ix,jx))
+    elseif (method .eq. 2) then   ! matinv
+       allocate(arr(nij,nij))
+       allocate(rhs(nij))
+       allocate(vec(nij))
+    elseif (method .eq. 3) then   ! sparse
+       allocate(elspa(NMAX))
+       allocate(rhs(nij))
+       allocate(vec(nij))
+       allocate(vec_r8(nij))
+    else
+       print*, 'Currently, there are only 3 methods to solve matrix: '
+       print*, 'OVERCHANRT_Method = 1, Johm Shepherd scheme;'
+       print*, 'OVERCHANRT_Method = 2, basic Gaussian elimination;'
+       print*, 'OVERCHANRT_Method = 3, row-indexed sparse storage method'
+       call hydro_stop("OverlandChannelRouting")
+    endif
+
+#ifdef HYDRO_D
+#ifdef MPP_LAND
+    if (my_id .eq. IO_id) then
+#endif
+    write(6,*) '   current timestep = ', istep+1, ', sub-timestep = ', isub, '/', nsub
+#ifdef MPP_LAND
+    endif
+#endif
+#endif
+
+    ! parameters for numerical method 
+    IF (method .eq. 1) THEN 
+       rimp  = 1.
+       niter = 5
+    ELSEIF (method .eq. 2) THEN
+       rimp  = 1.
+       niter = 1
+    ELSEIF (method .eq. 3) THEN
+       rimp  = 1.
+       niter = 1
+    ENDIF
+
+#ifdef MPP_LAND
+      ! in this subroutine, only with serial running
+      its = 1    
+      ite = ix   ! = global_rt_nx
+      jts = 1
+      jte = jx   ! = global_rt_ny
+#else
+      its = 1
+      ite = ix
+      jts = 1
+      jte = jx
+#endif
+
+    ! grid size and grid area
+    tareal = 0.0
+    do j = jts, jte
+       do i = its, ite
+          dx(i,j) = dgrid
+          dy(i,j) = dgrid
+          darea(i,j) = dgrid * dgrid
+          if (ltype(i,j) .eq. 1) then
+            tareal = tareal + dgrid * dgrid
+          endif
+       end do
+    end do
+
+    ! if first call, record initial water level
+    IF ( (istep .eq. 0) .and. (isub .eq. 1)) THEN
+       allocate(hlake_ocean(ix,jx))
+
+        do j = jts, jte
+          do i = its, ite
+             hlake_ocean(i,j) = hlake(i,j)
+          end do
+       end do
+    END IF
+
+    ! if first call, set sparse storage vector ijspa
+    ! and index indij(i,j,8) for all directions
+    IF ( (method .eq. 3) .and. (istep .eq. 0) .and. (isub .eq. 1)) THEN
+       ! sparse                first timestep       first sub-timestep
+
+        allocate(indij(ix,jx,8))
+        allocate(ijspa(ix*jx*9+2))
+
+        call zeroi_rt(indij, ix*jx*8)
+        call zeroi_rt(ijspa, ix*jx*9+2)
+
+        koff = ix * jx + 1
+        do j = jts, jte
+          do i = its, ite
+             n = i + (j-1) * ix
+             ijspa(n) = koff + 1
+             IF (ltype(i,j) .ge. 1) THEN
+               do k = 1, 8
+                 i2 = i + iqq(k)
+                 j2 = j + jqq(k)
+                 n2 = i2 + (j2 - 1) * ix
+
+                 IF (      (i2 .ge. 1) .and. (i2 .le. ix)    &
+                     .and. (j2 .ge. 1) .and. (j2 .le. jx)    &
+                     .and. (ltype(i2,j2) .ge. 1)             &
+                     .and. (ltype(i,j).eq.1 .or. ltype(i2,j2).eq.1)) then
+                    koff = koff + 1
+                    ijspa(koff)  = n2
+                    indij(i,j,k) = koff
+                 ENDIF
+
+               enddo
+             ENDIF
+          end do
+        end do
+        ijspa(ix * jx + 1) = koff + 1
+    ENDIF
+
+    ! hlakeprev = hlake
+!-------------------------------------------------
+!C.Jiang,201910
+    IF ( (istep.eq. 0) .and. (isub .eq. 1))  iit=0
+     
+!    PRINT*,iit,'Cong JIang'     
+    iit=iit+1
+!
+!if not using the central difference
+!    iit=1
+!-----------------------------------   
+    if (iit.eq.2) then 
+    allocate(hlakeprev1(ix,jx))
+    allocate(hlakeprev2(ix,jx))
+    call scopy_rt(nij, hlake, 1, hlakeprev2, 1)
+    call scopy_rt(nij, hlake_ocean, 1, hlake, 1)
+    endif 
+    
+    if ((iit.gt.2).and.(mod(iit,2).eq.1)) then
+    call scopy_rt(nij,hlake, 1, hlakeprev1, 1)
+    call scopy_rt(nij,hlakeprev2, 1, hlake, 1)    
+    elseif ((iit.gt.2).and.(mod(iit,2).eq.0)) then
+    call scopy_rt(nij,hlake, 1, hlakeprev2, 1)
+    call scopy_rt(nij,hlakeprev1, 1, hlake, 1) 
+    endif
+!--------------------------------------------------
+
+    call scopy_rt(nij, hlake, 1, hlakeprev, 1)  
+    ! step overland + channel routing
+! *********************
+    do iter = 1, niter 
+! *********************
+       call zero_rt(zfstora, ix*jx*4)
+       call zero_rt(zfstorb, ix*jx*4) 
+       call zero_rt(zlocal,  nij)
+       call resetr_rt(zdt,   nij, 1.)
+
+       if (method .eq. 1) then
+          call zero_rt(za, nij)
+          call zero_rt(zb, nij)
+       elseif (method .eq. 2) then
+          call zero_rt(rhs, nij)
+          call zero_rt(arr, nij*nij)
+          do i = 1, nij
+             arr(i,i) = 1.
+          end do
+       elseif (method .eq. 3) then
+          call zero_rt(rhs, nij)
+          call zero_rt(elspa, NMAX)
+          do i = 1, nij
+             elspa(i) = 1.
+          end do
+       endif
+      
+       do j = jts, jte
+         do i = its, ite
+            hlaker(i,j) = rimp*hlake(i,j) + (1.-rimp)*hlakeprev(i,j)
+         end do
+       end do
+
+       ! set local timestep/capacity (zdt) and sources (zlocal)
+       zloctot = 0.
+       do j = jts, jte
+          do i = its, ite
+             if (ltype(i,j) .ge. 1) then
+                n = i + (j-1)*ix
+!--------------------------------------------------------------
+!C.Jiang,2019.10
+               IF (iit.eq.1) THEN                
+                
+                if (hlakeprev(i,j) .gt. elev(i,j)) then 
+                   zdt(n) = dt/darea(i,j)
+                else
+                   zdt(n) = dt/(darea(i,j)*fbed(i,j))
+                endif
+
+               ELSE
+                
+                if (hlakeprev(i,j) .gt. elev(i,j)) then
+                    zdt(n) = 2.0*dt/darea(i,j)
+                else
+                    zdt(n) = 2.0*dt/(darea(i,j)*fbed(i,j))
+                endif
+ 
+               ENDIF
+!---------------------------------------------------------------
+                f = fwater(i,j)  ! Qian, 2016.12
+!                f = fbed(i,j)   ! CONG J,2018.08
+                if (ltype(i,j) .eq. 2) then
+                   zsource = 0.
+                else
+!                   zsource = (f*(precip(i,j)-evap(i,j)) +            &
+!                             (1.-f)* runoff(i,j)) * darea(i,j)
+!                   if (present(rsat))    zsource = zsource + (1.-f)*rsat(i,j)*darea(i,j)
+                   zsource = runoff(i,j) * darea(i,j)
+!                   if (runoff(i,j).gt.0.) print*,'CongJiang',86400*runoff(i,j)  
+!C.Jiang,20190827
+                   zsource = zsource - f * evap(i,j)
+                   if (present(rsat))    zsource = zsource + rsat(i,j)*darea(i,j)
+
+                   if (present(cglflux)) zsource = zsource - cglflux(i,j)*darea(i,j)
+                   if (present(cgiflux)) zsource = zsource - cgiflux(i,j)*darea(i,j)
+                   if (present(cuiflux)) zsource = zsource - cuiflux(i,j)*darea(i,j)  
+
+                endif
+                 !!C.Jiang,201908,Test--------------------------------------------
+                zsource = 0.   !!!!
+                zloctot     = zloctot + zsource
+                zlocal(i,j) = zsource * zdt(n)
+
+                if ( (method .eq. 2) .or. (method .eq. 3) ) then
+                   rhs(n) = rhs(n) + zlocal(i,j)
+                endif
+             endif
+          end do
+       end do
+
+       ! Assemle za  and zb    terms (shepherd)
+       !         arr and rhs   terms (matrix)
+       !         rhs and elspa terms (sparse)
+       do j = jts, jte
+          do i = its, ite
+if1:         if (ltype(i,j) .ge. 1) then
+                 
+                 n = i + (j-1)*ix 
+                 ! look at 1st 4 quadrants (get all connections over domain)
+                 ! each increments two off-diagonal elements in arr/elspa
+loop1:           do k = 1, 4
+                    i2 = i  + iqq(k)
+                    j2 = j  + jqq(k)
+                    n2 = i2 + (j2-1)*ix
+                     
+if2:                if (      (i2 .ge. 1) .and. (i2 .le. ix)    &
+                        .and. (j2 .ge. 1) .and. (j2 .le. jx)    &
+                        .and. (ltype(i2,j2) .ge. 1)             &
+                        .and. (ltype(i,j).eq.1 .or. ltype(i2,j2).eq.1)) then
+
+if3:                  if (j .eq. j2) then
+                         dists(k) = 0.5*(dx(i,j)+dx(i2,j2))
+                         dista(k) = 0.5*(dy(i,j)+dy(i2,j2))
+                      elseif (i .eq. i2) then  if3
+                         dists(k) = 0.5*(dy(i,j)+dy(i2,j2))
+                         dista(k) = 0.5*(dx(i,j)+dx(i2,j2))
+                      else if3
+                         dists(k) = sqrt(  (0.5*(dx(i,j)+dx(i2,j2)))**2 &
+                                         + (0.5*(dy(i,j)+dy(i2,j2)))**2 )
+                         dista(k) = 0.25*(dx(i,j)+dx(i2,j2)+dy(i,j)+dy(i2,j2))
+                      endif if3
+
+                      if (hlaker(i,j).gt.hlaker(i2,j2))  then
+                       
+                        hsdep = sdep(i,j)
+                      else
+                        hsdep = sdep(i2,j2)
+                      endif
+!
+!if not using the storage depth
+                       hsdep=0.
+!-------------------------------
+                      sabs   = abs( (hlaker(i,j)-hlaker(i2,j2))/dists(k) )
+                      zdepr  = max( hlaker(i,j), hlaker(i2,j2) ) - &
+                               max( elev(i,j)-bank(i,j), elev(i2,j2)-bank(i2,j2) )
+                      zdepr  = max( 0., min(zdepr, depmax)-hsdep)
+                      zwidr  = min( width(i,j), width(i2,j2) )
+                      zcrosr = zdepr * zwidr
+
+                      zdepl  = max( hlaker(i,j), hlaker(i2,j2) ) - &
+                               max( elev(i,j), elev(i2,j2) )
+                      zdepl  = max( 0., min(zdepl, depmax) )
+                      zwidl  = max( 0., dista(k)-zwidr )
+                      zcrosl = zdepl * zwidl
+
+                      zrough = 0.5 * (rough(i,j) + rough(i2,j2) )
+
+                      ! Manning coefficient
+if4:                  if (sabs .gt. slopecrit) then 
+                         powslope = 0.5 
+                         powconst = 1.0
+                      else if4
+                         powslope = 1.0
+                         powconst = slopecrit**(powslope-0.5)
+                      endif if4
+!C.Jiang,201909.test
+!------------------------------------------------                       
+!                       powslope = 0.5 
+!                       powconst = 1.
+!------------------------------------------------                      
+                   
+! print*,sdep(i,j)                     
+                      !!Cong J,20190731,to correct zdepr,[2.5]
+ !                      if (zdepr.gt.sdep(i,j)) then
+                        zf = ( (2.5/zrough)*zcrosr*(zcrosr/(zwidr+2.*zdepr))**(2./3.) + & 
+                               (2.5/zrough)*zcrosl*(zdepl**(2./3.)) ) &
+                                    * sabs**(powslope-1.)/(powconst*dists(k))
+!                        else 
+!                        zf=0.
+!                        endif
+
+!                       zf = ( (2.5/zrough)*zcrosr*(zdepr**(2./3.)) + &
+!                              (2.5/zrough)*zcrosl*(zdepl**(2./3.)) ) &
+!                             * sabs**(powslope-1.)/(powconst*dists(k))
+
+                      ! zfstora & zfstorb used for exact eomputation
+                      ! of diagnostic streamflux   
+                      zfstora(i,j,k) = zf
+                      zfstorb(i,j,k) = zf * powslope
+   
+if5:                  if (method .eq. 1) then          ! shepherd
+                         za(i,j)   = za(i,j)   + zdt(n) * zf * (hlaker(i2,j2)-hlaker(i,j))
+                         za(i2,j2) = za(i2,j2) + zdt(n2)* zf * (hlaker(i,j)-hlaker(i2,j2))
+                         zb(i,j)   = zb(i,j)   + zdt(n) * rimp * zf * powslope
+                         zb(i2,j2) = zb(i2,j2) + zdt(n2)* rimp * zf * powslope
+
+                      elseif (method .eq. 2) then if5  ! matinv
+                         rhs(n)    = rhs(n)    + zdt(n) * zf * (hlaker(i2,j2)-hlaker(i,j))
+                         rhs(n2)   = rhs(n2)   + zdt(n2)* zf * (hlaker(i,j)-hlaker(i2,j2))
+                         arr(n,n)  = arr(n,n)  + zdt(n) * rimp * zf * powslope
+                         arr(n,n2) = arr(n,n2) - zdt(n) * rimp * zf * powslope
+                         arr(n2,n2)= arr(n2,n2)+ zdt(n2)* rimp * zf * powslope
+                         arr(n2,n) = arr(n2,n) - zdt(n2)* rimp * zf * powslope
+ 
+                      elseif (method .eq. 3) then if5  ! sparse
+                         rhs(n)    = rhs(n)    + zdt(n) * zf * (hlaker(i2,j2)-hlaker(i,j))
+                         rhs(n2)   = rhs(n2)   + zdt(n2)* zf * (hlaker(i,j)-hlaker(i2,j2))
+                         m  = indij(i, j, k)
+                         m2 = indij(i2,j2,kop(k)) 
+                         elspa(n)  = elspa(n)  + zdt(n) * rimp * zf * powslope
+                         elspa(m)  = elspa(m)  - zdt(n) * rimp * zf * powslope
+                         elspa(n2) = elspa(n2) + zdt(n2)* rimp * zf * powslope
+                         elspa(m2) = elspa(m2) - zdt(n2)* rimp * zf * powslope
+
+                      endif if5 
+
+                    endif if2
+
+                 end do loop1
+
+             endif if1
+          end do
+       end do
+
+       ! solve linear system arr * vec = rhs for vec(=hlake-hlaker)
+       if (method .eq. 2) then        ! matinv
+          call linsolvehyd(arr, rhs, vec, nij)
+       elseif (method .eq. 3) then    ! sparse
+          call zero_rt(vec, nij)
+          call zeror8_rt(vec_r8, nij) ! REAL(kind=8) vec_r8 for linbcg
+          itol   = 1
+          tol    = 1.D-11
+          itmax  = 1000
+
+          call linbcg(nij,   DBLE(rhs), vec_r8, itol,  tol,  itmax, &
+                      itlin, errlin,    NMAX,   DBLE(elspa), ijspa )
+          vec = REAL(vec_r8)          ! REAL(kind=8) vec for hlake calculation
+
+          if (abs(errlin) .gt. 2.d0*tol ) then 
+             write(6,*) & 
+             '***** Warning linbcg: itlin=', itlin, ' errlin=', errlin
+!QIAN             vec = 0.
+          endif
+       endif       
+
+        do j = jts, jte
+           do i = its, ite
+              n = i + (j-1) * ix
+                 do k = 1, 4
+                 i2 = i + iqq(k)
+                 j2 = j + jqq(k)
+                 n2 = i2 + (j2-1) * ix
+               
+!                 if((zfstora(i,j,k) * (hlaker(i,j)-hlaker(i2,j2))).gt.1000.) then
+!                 print*,zfstora(i,j,k) * (hlaker(i,j)-hlaker(i2,j2)),zfstorb(i,j,k) * (vec(n) - vec(n2)),'first and second'
+!                 print*, zdt(n)*(zfstora(i,j,k) * (hlaker(i,j)-hlaker(i2,j2))+ zfstorb(i,j,k) * (hlake(i,j) -hlaker(i,j))),'VEC1',vec(n),'VEC2'
+!                 print*,i,j,i2,j2,k,'i ','j ','i2 ','j2 ','k'
+!                 endif
+
+             enddo
+           enddo
+         enddo
+
+       ! set hlake, and apply any negative volume correction
+       enegsub = 0.
+       do j = jts, jte
+          do i = its, ite
+
+             flx_fix(i,j) = 0. 
+             if (ltype(i,j) .ge. 1) then
+ 
+                if (method .eq. 1) then                                      ! shepherd
+                   hlake(i,j) = ( hlakeprev(i,j) + za(i,j) + zlocal(i,j) + &
+                                  zb(i,j)*hlaker(i,j) ) / ( 1. + zb(i,j) )
+                elseif ( (method .eq. 2) .or. (method .eq.3) )then           ! matinv / sparse
+                   n = i + (j-1) * ix
+                   hlake(i,j) = hlaker(i,j) + vec(n)
+                endif
+
+                ! correct for any "crossing" of elevation, 
+                ! i.e. inaccurate capacity (1 or fbed) used for whole timestep
+                if (      (hlakeprev(i,j) .gt. elev(i,j))         &
+                    .and. (hlake(i,j)     .le. elev(i,j)) ) then 
+                   hlake(i,j) = elev(i,j) - (elev(i,j)-hlake(i,j) ) / fbed(i,j)
+
+                elseif (      (hlakeprev(i,j) .le. elev(i,j))     &
+                        .and. (hlake(i,j)     .gt. elev(i,j)) ) then
+                   hlake(i,j) = elev(i,j) + (hlake(i,j)-elev(i,j)) * fbed(i,j)
+
+                endif
+
+                ! crude fix for negative volume
+                if (hlake(i,j) .lt. elev(i,j)-bank(i,j)) then
+!                   if (ltype(i,j) .eq. 1) then
+                      flx_fix(i,j) = (elev(i,j) - bank(i,j) - hlake(i,j)) &
+                                     * fbed(i,j) * darea(i,j) / dt
+                      enegsub = enegsub + (elev(i,j) - bank(i,j) - hlake(i,j))  &
+                                        * fbed(i,j) * darea(i,j) / dt
+!                   endif
+                   hlake(i,j) = elev(i,j) - bank(i,j)  ! fix for hlake(i,j)
+                endif
+
+             endif
+          end do
+       end do
+
+
+       ! set totosub (diagnostic, total stream flux out of basin)
+       ! streamflux, istreamflux (diagnostic, total stream flux 
+       ! and average quarfrant out of each grid cell )
+       totosub = 0.
+       call zero_rt (streamflux,  nij)
+       call zero_rt (work, nij)
+!       call zeroi_rt(istreamflux, nij)
+       
+       do j = jts, jte
+          do i = its, ite
+             n = i + (j-1) * ix
+            
+             flx_ocn(i,j) = 0. 
+             do k = 1, 4
+                i2 = i + iqq(k)
+                j2 = j + jqq(k)
+                n2 = i2 + (j2-1) * ix
+
+                if (      (i2 .ge. 1) .and. (i2 .le. ix)    &
+                    .and. (j2 .ge. 1) .and. (j2 .le. jx)) then
+                    
+                    if ( (ltype(i2,j2) .ge. 1) .and.            &
+                         (ltype(i,j)   .eq. 1  .or.  ltype(i2,j2).eq.1)) then
+
+                       if (method .eq. 1) then                             ! shepherd
+                          zs = zfstora(i,j,k) * (hlaker(i,j)-hlaker(i2,j2))   &
+                             + zfstorb(i,j,k) * (hlake(i,j) -hlaker(i,j))
+                       elseif ( (method .eq. 2) .or. (method .eq.3) )then  ! matinv / sparse
+                          zs = zfstora(i,j,k) * (hlaker(i,j)-hlaker(i2,j2))   &
+                             + zfstorb(i,j,k) * (vec(n) - vec(n2))
+                       endif
+           
+!                if((zfstora(i,j,k) * (hlaker(i,j)-hlaker(i2,j2))).gt.1000.) then              
+!                print*,zfstora(i,j,k) * (hlaker(i,j)-hlaker(i2,j2)),zfstorb(i,j,k) * (vec(n) - vec(n2)),'first and second'
+!                print*, zs*zdt(n),'VEC1',vec(n),'VEC2'
+!                print*,i,j,i2,j2,k,'i','j','i2','j2','k'
+!                endif
+
+
+                       if (zs .gt. 0.) then
+                          streamflux(i,j) = streamflux(i,j) + zs
+                          work(i,j) = work(i,j) + k * zs
+                       else
+                          streamflux(i2,j2) = streamflux(i2,j2) - zs
+                          work(i2,j2) = work(i2,j2) - kop(k) * zs
+                       endif
+
+                   endif
+
+                endif
+             end do
+
+             if (ltype(i,j) .eq. 2) then  ! ocean in contact with basin
+                flx_ocn(i,j) = darea(i,j) * (hlake(i,j) - hlake_ocean(i,j))/dt 
+                totosub = totosub + darea(i,j) * (hlake(i,j) - hlake_ocean(i,j))/dt
+
+                hlake(i,j) = hlake_ocean(i,j)
+             endif
+
+          end do
+       end do     
+
+!         do j = jts, jte
+!            do i = its, ite
+!               n = i + (j-1) * ix 
+!               if(vec(n).ne.0.) then
+!               print*, streamflux(i,j)*zdt(n),'VEC1',vec(n),'VEC2'
+!               print*,streamflux(i,j)*zdt(n)+vec(n),'VEC1-VEC2'    
+!               endif     
+!               enddo
+!             enddo
+
+       do j = jts, jte
+          do i = its, ite
+             ! streamflux dirextion
+             if (streamflux(i,j) .gt. 0.) then
+                istreamflux(i,j) = nint(work(i,j)/streamflux(i,j))
+             else
+                istreamflux(i,j) = 0
+             endif
+          end do
+       end do
+
+       dtot = 0.0
+       dtoa = 0.0
+       do j = jts, jte
+          do i = its, ite
+             ! compute the change of hlake in watershed
+             if (ltype(i,j) .eq. 1) then
+                if ((hlake(i,j) .le. elev(i,j)) .and. (hlakeprev(i,j) .le. elev(i,j))) then
+                   dtmp = (hlake(i,j)  - hlakeprev(i,j))  * fbed(i,j)  * darea(i,j) /dt
+                elseif((hlake(i,j) .gt. elev(i,j)) .and. (hlakeprev(i,j) .le. elev(i,j))) then
+                   dtmp = ((hlake(i,j) - elev(i,j)     ) * 1.0 +  &
+                           (elev(i,j)  - hlakeprev(i,j)) * fbed(i,j)) * darea(i,j) / dt
+                elseif((hlake(i,j) .le. elev(i,j)) .and. (hlakeprev(i,j) .gt. elev(i,j))) then
+                   dtmp = ((hlake(i,j) - elev(i,j))      * fbed(i,j) + & 
+                           (elev(i,j)  - hlakeprev(i,j)) * 1.0 )      * darea(i,j) / dt 
+                elseif((hlake(i,j) .gt. elev(i,j)) .and. (hlakeprev(i,j) .gt. elev(i,j))) then
+                   dtmp = (hlake(i,j)  - hlakeprev(i,j)) * 1.0        * darea(i,j) /dt 
+                endif
+                dtot = dtot + dtmp
+                dtoa = dtoa + abs(dtmp)
+             endif
+          end do
+       end do
+   
+    ! surface water balance check at current sub-timestep
+#ifdef HYDRO_D
+    write(6,*)   'Balance Check for this sub-timestep'
+    zz = 1.0E3 * 86400. / tareal
+!    write(6,901) '          m3/s', &
+!                 dtot, dtoa, zloctot, totosub, enegsub, &
+!                 dtot - (zloctot - totosub + enegsub)
+    
+    write(6,901) '        mm/day', &
+                 dtot*zz, dtoa*zz, zloctot*zz, totosub*zz, enegsub*zz, &
+                 (dtot - (zloctot - totosub + enegsub))*zz
+  901 format                                             &
+        (3x, 'balance check:         dh/dt       |dh/dt|        influx' &
+                            '       ocnflux       bankfix         error' &
+        /3x, A14, 6(e14.4))
+
+#endif
+
+! ********************* 
+    end do
+! *********************
+
+    ! DEALLOCATE
+!    if (method .eq. 1) then       ! shepherd 
+!       deallocate(za)
+!       deallocate(zb)
+!    elseif (method .eq. 2) then   ! matinv
+!       deallocate(arr)
+!       deallocate(rhs)
+!       deallocate(vec)
+!    elseif (method .eq. 3) then   ! sparse
+!       deallocate(elspa)
+!       deallocate(rhs)
+!       deallocate(vec)
+!       deallocate(vec_r8)
+!    endif
+
+    RETURN 
+  end subroutine OverlandChannelRouting
+
+! ------------------------------------------------------------
+  subroutine scopy_rt(NT, ARR, INCA, BRR, INCB)
+    implicit none
+
+    ! copy array ARR to BRR, incrementing by INCA and INCB
+    ! same as Cray SCOPY
+ 
+    INTEGER, INTENT(IN) :: NT
+    INTEGER, INTENT(IN) :: INCA
+    INTEGER, INTENT(IN) :: INCB
+    REAL, INTENT(IN),    DIMENSION(NT) :: ARR
+    REAL, INTENT(INOUT), DIMENSION(NT) :: BRR
+
+    ! local variable
+    INTEGER :: IA, IB
+
+    IB = 1
+    DO IA = 1, NT, INCA
+       BRR(IB) = ARR(IA)
+       IB = IB + INCB 
+    END DO
+
+    RETURN
+  end subroutine scopy_rt
+
+! ------------------------------------------------------------
+  subroutine zero_rt(ARR, NT)
+    implicit none
+!   assign zero for single precision array
+ 
+    REAL, INTENT(INOUT), DIMENSION(NT) :: ARR
+    INTEGER, INTENT(IN)                :: NT
+
+    INTEGER :: i
+
+    do i = 1, NT
+       ARR(i) = 0.
+    end do
+
+    RETURN
+  end subroutine zero_rt
+
+! ------------------------------------------------------------
+  subroutine zeror8_rt(ARR, NT)
+    implicit none
+!   assign zero for double precision array
+
+    REAL(kind=8), INTENT(INOUT), DIMENSION(NT) :: ARR
+    INTEGER,      INTENT(IN)                   :: NT
+    INTEGER :: i
+
+    do i = 1, NT
+       ARR(i) = 0.d0
+    end do
+
+  end subroutine zeror8_rt
+
+! ------------------------------------------------------------
+  subroutine zeroi_rt(ARR, NT)
+    implicit none
+!   assign zero for integer array
+
+    INTEGER, INTENT(INOUT), DIMENSION(NT) :: ARR
+    INTEGER, INTENT(IN)                   :: NT
+    INTEGER :: i
+
+    do i = 1, NT
+       ARR(i) = 0
+    end do
+
+  end subroutine zeroi_rt
+
+! ------------------------------------------------------------
+  subroutine resetr_rt(a, n, val)
+     implicit none 
+
+     INTEGER, INTENT(IN)                  :: n
+     REAL,    INTENT(INOUT), DIMENSION(n) :: a
+     REAL,    INTENT(IN)                  :: val
+
+     INTEGER :: i
+
+     do i = 1, n
+        a(i) = val
+     end do
+
+     RETURN
+  end subroutine resetr_rt
+
+! ------------------------------------------------------------
+  subroutine linbcg(n,    b,   x,    itol, tol, itmax, &
+                    iter, err, nmax, sa,   ija)
+    implicit none
+
+! Solves AX = b for x[1...n],  given b[1...n] by the iterative biconjugate gradient method.
+! On input,  x[1...n] should be set to an initial guess of the solution (or all zeros);
+! 	     itol is 1, 2, 3 or 4, specifying which convergence test is applied;
+!            itmax is the maximum number of allowed iterations;
+!            tol is the desired convergence tolerance.
+! On output, x[1...n] is reset to the improved solution;
+!            iter is the number of iterations actually taked;
+!            err is the estimated error.
+! The matrix A is referenced only through the user-supplied routines 
+! atimes, which computes the products of either A or its transpose on a vector, and  
+! asolve, which solves (preconditionerA)X = b or (preconditionerA)^T X = b for some 
+! preconditioner matrix A (preconditionerA) (possibly the trivial diagonal part of A).
+
+    INTEGER,      INTENT(IN)                     :: n      ! ix*jx
+    REAL(kind=8), INTENT(IN),    DIMENSION(n)    :: b      ! rhs(n)
+    REAL(kind=8), INTENT(INOUT), DIMENSION(n)    :: x      ! vec(n)
+    INTEGER,      INTENT(IN)                     :: itol   ! convergence test method
+    REAL(kind=8), INTENT(IN)                     :: tol    ! desired convergence tolerance
+    INTEGER,      INTENT(IN)                     :: itmax  ! maximum iteration
+    INTEGER,      INTENT(OUT)                    :: iter   ! actual number of iteration
+    REAL(kind=8), INTENT(OUT)                    :: err    ! estimated error
+    INTEGER,      INTENT(IN)                     :: nmax   ! NMAX
+    REAL(kind=8), INTENT(IN),    DIMENSION(nmax) :: sa     ! elspa(NMAX)
+    INTEGER,      INTENT(IN),    DIMENSION(nmax) :: ija    ! ijspa(NMAX)
+
+    REAL(kind=8), PARAMETER :: EPS  = 1.D-14
+
+    INTEGER :: j
+    REAL(kind=8)    :: ak, akden, bk, bkden, bknum, bnrm, dxnrm, xnrm, zm1nrm, znrm
+    REAL(kind=8), DIMENSION(NMAX) :: p, pp, r, rr, z, zz
+    REAL(kind=8)    :: tmp
+
+    iter = 0
+    call atimes(n, x, r, 0, nmax, sa, ija)
+ 
+    do j = 1, n
+       r(j)  = b(j) - r(j)
+       rr(j) = r(j)
+    end do
+
+    if (itol .eq. 1) then
+       call snrm_cal(bnrm, n, b, itol)
+       call asolve(n, r, z, 0, nmax, sa, ija)
+    elseif (itol .eq. 2) then
+       call asolve(n, b, z, 0, nmax, sa, ija)
+       call snrm_cal(bnrm, n, z, itol)
+       call asolve(n, r, z, 0, nmax, sa, ija)
+    elseif ((itol .eq. 3) .or. (itol .eq. 4)) then
+       call asolve(n, b, z, 0, nmax, sa, ija)
+       call snrm_cal(bnrm, n, z, itol)
+       call asolve(n, r, z, 0, nmax, sa, ija)
+       call snrm_cal(znrm, n, z, itol)
+    else
+       write(6,*) 'illegal itol in linbcg'
+       call hydro_stop("linbcg")
+    endif
+
+100 if (iter .le. itmax) then
+       iter  = iter + 1
+       call asolve(n, rr, zz, 1, nmax, sa, ija)
+
+       bknum = 0.d0       
+       do j = 1, n
+         bknum = bknum + z(j) * rr(j)
+       end do
+
+       if (iter .eq. 1) then
+          do j = 1, n
+             p(j)  = z(j)
+             pp(j) = zz(j)
+          end do
+       else
+          bk = bknum/bkden
+          do j = 1, n
+             p(j)  = bk * p(j)  + z(j)
+             pp(j) = bk * pp(j) + zz(j)
+          end do
+       endif
+       bkden = bknum
+
+       call atimes(n, p, z, 0, nmax, sa, ija)
+
+       akden = 0.d0
+       do j = 1, n
+          akden = akden + z(j) * pp(j)
+       end do
+       ak = bknum / akden
+
+       call atimes(n, pp, zz, 1, nmax, sa, ija)
+       do j = 1, n
+          x(j)  = x(j)  + ak * p(j)
+          r(j)  = r(j)  - ak * z(j) 
+          rr(j) = rr(j) - ak * zz(j) 
+       end do
+
+       call asolve(n, r, z, 0, nmax, sa, ija) 
+
+       if (itol .eq. 1) then
+          call snrm_cal(tmp, n, r, itol)
+          err = tmp / bnrm
+       elseif (itol .eq. 2) then
+          call snrm_cal(tmp, n, z, itol)
+          err = tmp / bnrm
+       elseif ((itol .eq. 3) .or. (itol .eq. 4)) then
+          zm1nrm = znrm
+          call snrm_cal(znrm, n, z, itol) 
+          if ( abs(zm1nrm-znrm) .gt. EPS*znrm ) then
+             call snrm_cal(tmp, n, p, itol)
+             dxnrm = abs(ak) / tmp
+             err   = znrm / abs(zm1nrm-znrm) * dxnrm
+          else
+             err   = znrm / bnrm
+             goto 100
+          endif
+          call snrm_cal(xnrm, n, x, itol)
+          if ( err .le. 0.5d0*xnrm ) then
+             err = err / xnrm
+          else
+             err = znrm / bnrm
+             goto 100
+          endif
+       endif
+ 
+       if (err .gt. tol) goto 100
+    endif
+
+    RETURN
+  end subroutine linbcg
+
+! ------------------------------------------------------------
+  subroutine atimes(n, x, r, itrnsp, nmax, sa, ija)
+    implicit none
+
+    INTEGER,         INTENT(IN)                     :: n
+    REAL(kind=8),    INTENT(INOUT), DIMENSION(n)    :: x
+    REAL(kind=8),    INTENT(INOUT), DIMENSION(n)    :: r
+    INTEGER,         INTENT(IN)                     :: itrnsp
+    INTEGER,         INTENT(IN)                     :: nmax   
+    REAL(kind=8),    INTENT(IN),    DIMENSION(nmax) :: sa     
+    INTEGER,         INTENT(IN),    DIMENSION(nmax) :: ija    
+
+    if (itrnsp .eq. 0) then
+       call dsprsax(sa, ija, nmax, x, r, n)
+    else
+       call dsprstx(sa, ija, nmax, x, r, n)
+    endif
+
+    RETURN
+
+  end subroutine atimes
+
+! ------------------------------------------------------------
+  subroutine asolve(n, b, x, itrnsp, nmax, sa, ija)
+    implicit none
+
+    INTEGER,         INTENT(IN)                     :: n
+    REAL(kind=8),    INTENT(IN),    DIMENSION(n)    :: b
+    REAL(kind=8),    INTENT(OUT),   DIMENSION(n)    :: x
+    INTEGER,         INTENT(IN)                     :: itrnsp 
+    INTEGER,         INTENT(IN)                     :: nmax
+    REAL(kind=8),    INTENT(IN),    DIMENSION(nmax) :: sa
+    INTEGER,         INTENT(IN),    DIMENSION(nmax) :: ija
+
+    INTEGER :: i
+
+    do i = 1, n
+       x(i) = b(i) / sa(i)
+    end do
+
+    RETURN
+  end subroutine asolve
+
+! ------------------------------------------------------------
+  subroutine dsprsax(sa, ija, nmax , x, b, n)
+    implicit none
+
+    INTEGER,         INTENT(IN)                     :: n
+    INTEGER,         INTENT(IN)                     :: nmax
+    REAL(kind=8),    INTENT(IN),    DIMENSION(nmax) :: sa
+    INTEGER,         INTENT(IN),    DIMENSION(nmax) :: ija
+    REAL(kind=8),    INTENT(INOUT), DIMENSION(n)    :: x
+    REAL(kind=8),    INTENT(INOUT), DIMENSION(n)    :: b     
+
+    INTEGER :: i, k
+
+    if (ija(1) .ne. n+2) then
+       write(6,*) 'mismatched vector and matrix in dsprsax' 
+       call hydro_stop("dsprsax")
+    endif
+
+    do i = 1, n
+       b(i) = sa(i) * x(i)
+       do k = ija(i), ija(i+1)-1 
+          b(i) = b(i) + sa(k) * x(ija(k))
+       end do
+    end do
+
+    RETURN
+  end subroutine dsprsax
+
+! ------------------------------------------------------------
+  subroutine dsprstx(sa, ija, nmax , x, b, n)
+    implicit none
+
+    INTEGER,         INTENT(IN)                     :: n
+    INTEGER,         INTENT(IN)                     :: nmax
+    REAL(kind=8),    INTENT(IN),    DIMENSION(nmax) :: sa
+    INTEGER,         INTENT(IN),    DIMENSION(nmax) :: ija
+    REAL(kind=8),    INTENT(INOUT), DIMENSION(n)    :: x
+    REAL(kind=8),    INTENT(INOUT), DIMENSION(n)    :: b
+
+    INTEGER :: i, j, k
+
+    if (ija(1) .ne. n+2) then
+       write(6,*) 'mismatched vector and matrix in dsprstx'
+       call hydro_stop("dsprstx")
+    endif
+
+    do i = 1, n
+       b(i) = sa(i) * x(i)
+    end do
+
+    do i = 1, n
+       do k = ija(i), ija(i+1)-1
+          j    = ija(k)
+          b(j) = b(j) + sa(k) * x(i) 
+       end do 
+    end do  
+
+    RETURN
+
+  end subroutine dsprstx
+
+! ------------------------------------------------------------
+  subroutine snrm_cal(snrm, n, sx, itol)
+    implicit none
+
+    REAL(kind=8),    INTENT(OUT)              :: snrm
+    INTEGER, INTENT(IN)                       :: n
+    INTEGER, INTENT(IN)                       :: itol
+    REAL(kind=8),    INTENT(IN), DIMENSION(n) :: sx
+
+    INTEGER                                   :: i, isamax
+
+    if (itol .le. 3) then
+       snrm = 0.d0
+       do i = 1, n
+         snrm = snrm + sx(i)*sx(i)
+       end do
+       snrm = sqrt(snrm)
+    else
+       isamax = 1
+       do i = 1, n
+         if ( abs(sx(i)) .gt. abs(sx(isamax)) ) isamax = i
+       end do
+       snrm = abs(sx(isamax))
+    endif
+
+    RETURN
+  end subroutine snrm_cal
+
+! ------------------------------------------------------------
+  subroutine linsolvehyd (arr, rhs, vec, nd)
+    implicit none
+
+!   Solves linear system of equations, using basic gaussian 
+!   elimination with no pivoting (relies on all diagonal elements
+!   being and staying significantly non-zero)
+
+!   Equation: arr * vec = rhs. The solution is returned in vec 
+
+!   arr  = matrix of equation coefficients (supplied, overwritten)
+!          The elements a(i,j) for j = 1, nare the coefficients of 
+!          the i-th equation
+!   rhs  = right-hand side (supplied, overwritten)
+!   vec  = solution (returned)
+!   nd   = number of equations (supplied)
+
+    INTEGER, INTENT(IN)                      :: nd
+    REAL,    INTENT(INOUT), DIMENSION(nd,nd) :: arr
+    REAL,    INTENT(INOUT), DIMENSION(nd)    :: rhs 
+    REAL,    INTENT(INOUT), DIMENSION(nd)    :: vec
+
+    INTEGER                   :: i, j, id
+    REAL                      :: f
+    INTEGER, DIMENSION(nd,nd) :: mplate
+
+    do j = 1, nd
+      do i = 1, nd
+         if (arr(i,j) .eq. 0.) then
+            mplate(i,j) = 0 
+         else
+            mplate(i,j) = 1
+         endif
+      end do
+    end do
+
+    ! zero all array elements below the diagonal, preceeding from 
+    ! the first row to the last. Note that mplate is set non-zero
+    ! for changed (i,j) locations during j = id, nd.
+    do id = 1, nd-1
+       do i = id+1, nd
+          if (mplate(i,id) .ne. 0) then
+             f = arr(i,id) / arr(id,id)
+
+             do j = id, nd
+                if (mplate(id,j) .ne. 0) then
+                   arr(i,j)    = arr(i,j) - f*arr(id,j)
+                   mplate(i,j) = 1
+                endif
+             end do
+             rhs(i) = rhs(i) - f*rhs(id)
+
+          endif
+       end do
+    end do
+
+    ! all array elements below the diagonal are zero, so can
+    ! immediately solve the equations in reverse order
+    do id = nd, 1, -1
+       f = 0.
+
+       if (id .lt. nd) then
+          do j = id+1, nd
+             if ( mplate(id,j) .ne. 0 ) then
+                f = f + arr(id,j)*vec(j)
+             endif
+          end do
+       endif
+       vec(id) = (rhs(id) - f) / arr(id,id)
+
+    end do
+
+  RETURN
+  end subroutine linsolvehyd
+
+! ------------------------------------------------------------
+subroutine transect_ini(did, ix, jx, gltype)
+
+  implicit none
+
+  INTEGER, INTENT(IN)  :: did
+  INTEGER, INTENT(IN)  :: ix              ! number of grid in domain
+  INTEGER, INTENT(IN)  :: jx              ! number of grid in domain 
+  INTEGER, INTENT(IN)  :: gltype(ix,jx)   ! land surface type for whole domain
+
+! rt2d(did)%dx
+! nlst_rt(did)%ntran              ! number of transects
+! rt2d(did)%atran(2,2,ntran)      ! coordinates (lon,lat) of ending points in transect
+! rt2d(did)%xtran(2,ntran)        ! x-grid (i) of ending points in transect 
+! rt2d(did)%ytran(2,ntran)        ! y-grid (j) of ending points in transect
+! rt2d(did)%ncross(ntran)         ! number of grids crossing corresponding transect
+! rt2d(did)%itran(500,ntran)      
+! rt2d(did)%jtran(500,ntran)
+! rt2d(did)%ktran(500,ntran)
+! nlst_rt(did)%geo_finegrid_flnm
+
+  ! LOCAL VARIABLES
+  INTEGER :: ntran
+  REAL    :: dx
+  INTEGER :: n, i, j, k, nn 
+  REAL    :: xmin, xmax, ymin, ymax
+  INTEGER :: imin, imax, jmin, jmax
+  INTEGER :: x1, y1, x2, y2
+  REAL    :: a, b, c, d, e, f, det
+  REAL    :: xcross, ycross
+  REAL    :: S1, S2
+
+  REAL, ALLOCATABLE, DIMENSION(:,:) :: xtran
+  REAL, ALLOCATABLE, DIMENSION(:,:) :: ytran 
+
+  ! quadrant vectors
+  ! k:      1   2   3   4   5   6   7   8   
+  !         E,  NE, N,  NW, W,  SW, S,  SE
+  INTEGER :: iq(8), jq(8)
+  DATA iq/  1,  1,  0, -1, -1, -1,  0,  1/
+  DATA jq/  0,  1,  1,  1,  0, -1, -1, -1/
+
+  dx    = rt2d(did)%dx
+  ntran = nlst_rt(did)%ntran
+
+  allocate(xtran(2,ntran))
+  allocate(ytran(2,ntran))
+
+  ! readin information of transects
+  ! from transects.input
+  open(67,file="./hydro_transects.input", form="formatted") 
+    read(67,*) nn
+
+    if (nn .lt. ntran) then
+       print*, 'number of transects in transects.TBL < ntran in hydro.namelist'
+       print*, 'please provide more transects longitude & latitude'
+       call hydro_stop("transect_ini")
+    elseif (nn .gt. ntran) then
+       print*, 'number of transects in transects.TBL > ntran in hydro.namelist'
+       print*, 'HYDRO only reads the first ', ntran, ' transects longitude & latitude'
+    endif
+
+    read(67,*) ! lon1    lon2    lat1    lat2 
+    do i = 1, ntran 
+       read(67,*) rt2d(did)%atran(1,1,i), rt2d(did)%atran(2,1,i), &
+                  rt2d(did)%atran(1,2,i), rt2d(did)%atran(2,2,i) 
+    end do
+
+  close(67)
+
+  ! convert coordinates (lon,lat) to Lambert-distance (x,y), and finally
+  ! to grid (i,j) for transect ending points
+  do n = 1, ntran
+
+     call lambcoord_transect( rt2d(did)%xtran(1,n),    rt2d(did)%ytran(1,n),   &
+                     rt2d(did)%atran(1,1,n),  rt2d(did)%atran(1,2,n), &
+                     ix,   jx,   dx,  nlst_rt(did)%geo_finegrid_flnm )
+
+     call lambcoord_transect( rt2d(did)%xtran(2,n),    rt2d(did)%ytran(2,n),   &
+                     rt2d(did)%atran(2,1,n),  rt2d(did)%atran(2,2,n), &
+                     ix,   jx, dx, nlst_rt(did)%geo_finegrid_flnm  )   
+
+     print*, 'transect NO ', n, rt2d(did)%xtran(1,n), rt2d(did)%ytran(1,n), rt2d(did)%atran(1,1,n), rt2d(did)%atran(1,2,n)
+     print*, 'transect NO ', n, rt2d(did)%xtran(2,n), rt2d(did)%ytran(2,n), rt2d(did)%atran(2,1,n), rt2d(did)%atran(2,2,n)
+  end do
+
+
+  ! For each transect, find out the grids contributing to this transect flux
+  do n = 1, ntran
+     rt2d(did)%ncross(n) = 0
+
+     xtran(1,n) = rt2d(did)%xtran(1,n)
+     xtran(2,n) = rt2d(did)%xtran(2,n)
+     ytran(1,n) = rt2d(did)%ytran(1,n)
+     ytran(2,n) = rt2d(did)%ytran(2,n)
+
+     ! limit searching extent
+     xmin = min(xtran(1,n), xtran(2,n))
+     xmax = max(xtran(1,n), xtran(2,n))
+     ymin = min(ytran(1,n), ytran(2,n)) 
+     ymax = max(ytran(1,n), ytran(2,n))
+
+     imin = max(1, min(ix, nint(xmin)-4))   ! cushion of 4 grids
+     imax = max(1, min(ix, nint(xmax)+4))
+     jmin = max(1, min(jx, nint(ymin)-4))
+     jmax = max(1, min(jx, nint(ymax)+4))
+
+     ! line 1: cross-section line, by + ax = e
+     ! known points in line 1: 
+     ! point 1 (xtran(1,n), ytran(1,n))  
+     ! point 2 (xtran(2,n), ytran(2,n))
+     a = - (ytran(2,n) - ytran(1,n))
+     b = xtran(2,n) - xtran(1,n)
+     e = xtran(2,n)*ytran(1,n) - xtran(1,n)*ytran(2,n)
+
+do j = jmin, jmax
+  do i = imin, imax
+     if ( gltype(i,j) .eq. 1) then
+
+	x1 = i
+	y1 = j
+
+	! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	do k = 1, 8   ! 8-quadrant directions
+	! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	   ! test vector: (i,j) -> (i+iq(k),j+jq(k)), i.e.,
+	   ! flowing from (x1,y1) to (x2,y2)
+	   x2 = max(1, min(ix, i+iq(k))) 
+	   y2 = max(1, min(jx, j+jq(k)))
+
+	   ! line 2: test vector line, dy + cx = f
+	   ! known points of line 2: (x1,y1) & (x2,y2) 
+	   c  = - (y2 - y1)
+	   d  = x2 - x1
+	   f  = x2*y1 - x1*y2 
+
+	   det = a*d - b*c
+
+	   ! >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+	   ! det = 0. -> two lines are parallel
+	   ! det > 0. -> two lines are intersectant 
+	   if ( abs(det) .gt. 1.E-4  ) then
+	   ! >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+	      ! intersection of these two lines       
+	      xcross = ( d*e - b*f) / det
+	      ycross = (-c*e + a*f) / det
+
+	      ! if this intersection lies within 
+	      ! both the transect (line 1) and line 2
+	      ! this test vector probably contributes to transect flux
+	      if((xcross .ge. xmin)      .and. (xcross .le. xmax)        .and. &
+		 (ycross .ge. ymin)      .and. (ycross .le. ymax)        .and. &
+		 (xcross .ge. min(x1,x2) .and. (xcross .le. max(x1,x2))) .and. &
+		 (ycross .ge. min(y1,y2) .and. (ycross .le. max(y1,y2))) ) then
+
+		 rt2d(did)%ncross(n) = rt2d(did)%ncross(n) + 1
+		 if ( rt2d(did)%ncross(n) .gt. 500) then
+		    print*, 'two many transect crossings for n = ', n
+		    call hydro_stop('transect_ini')
+		 endif
+		 rt2d(did)%itran(rt2d(did)%ncross(n),n) = i
+		 rt2d(did)%jtran(rt2d(did)%ncross(n),n) = j
+		
+
+		 ! to judge the location of C(x3,y3) relative to vector 
+		 ! from A(x1,y1) to B(x2,y2)  
+		 ! S = (x1-x3)*(y2-y3) - (y1-y3)*(x2-x3)
+		 ! S > 0, C locates at the left of vector AB 
+		 ! S < 0, C locates at the right of vector AB
+		 ! S = 0, C locates in the vector AB 
+
+		 ! looking along transect from point 1 to point 2
+		 ! if test vector is crossing the transect from left to right, record as (+) k
+		 ! if test vector is crossing the transect from right to left, record as (-) k
+		 S1 = a*x1 + b*y1 - e 
+		 if (S1 .gt. 0.) then                              ! (x1,y1) lies at the left of transect               
+		    rt2d(did)%ktran(rt2d(did)%ncross(n),n) = k     ! flowing from left to right  
+		 elseif (S1 .lt. 0.) then                          ! (x1,y1) lies at the right of transect 
+		    rt2d(did)%ktran(rt2d(did)%ncross(n),n) = -k    ! flowing from right to left
+		 else
+		    S2 = a*x2 + b*y2 - e                         
+		    if (S2 .gt. 0.) then                           ! (x2,y2) lies at the left of transect
+		       rt2d(did)%ktran(rt2d(did)%ncross(n),n) = -k ! flowing from transect to left
+		    elseif (S2 .lt. 0.) then                       ! (x2,y2) lies at the right of transect
+		       rt2d(did)%ktran(rt2d(did)%ncross(n),n) = k  ! flowing from transect to right
+		    else
+		       print*, 'parallel to transect direction' 
+		       call hydro_stop('transect_ini')
+		    endif
+		 endif
+
+	      endif 
+
+	   ! >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+	   endif
+	   ! >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+	! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	end do
+	! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+     endif
+  end do  
+end do 
+
+  end do
+
+deallocate(xtran)
+deallocate(ytran)
+
+end subroutine transect_ini
+
+! ------------------------------------------------------------
+  subroutine lambcoord_transect(x,  y,  xlon, xlat, nx, ny,  &
+                       delgrd, filename)
+
+    implicit none
+
+#   include "netcdf.inc"
+
+    REAL,    INTENT(OUT) :: x      ! i-index position of point (including fraction)
+    REAL,    INTENT(OUT) :: Y      ! j-index position of point (including fraction)
+    REAL,    INTENT(IN)  :: xlon   ! longitude of point (degree E)
+    REAL,    INTENT(IN)  :: xlat   ! latitude of point (degree N)
+    INTEGER, INTENT(IN)  :: nx     ! i grid size of domain
+    INTEGER, INTENT(IN)  :: ny     ! j grid size of domain
+    REAL,    INTENT(IN)  :: delgrd ! resolution, m
+    CHARACTER(LEN=256), INTENT(IN) :: filename ! file including project information
+
+    ! LOCAL VARIABLES
+    REAL(kind=8), PARAMETER :: pi     = 3.14159265358979
+    REAL(kind=8), PARAMETER :: earthr = 6.370997D6
+    REAL(kind=8), PARAMETER :: ee     = 0.081819191      ! eccenrivity       
+    REAL :: xlat1, xlon1
+
+!   INTEGER :: NF_NOWRITE 
+    INTEGER :: ncstatic, iret, hires_flag, varid, map_proj
+    REAL    :: cenlon, cenlat, offx, offy, reflon, reflat
+    REAL(kind=8)       :: xr8, yr8, xr81, yr81
+    REAL(kind=8)       :: clmd0, cpsi0, xlatr, xlonr
+    REAL(kind=8)       :: qp, qo, qq, betao, beta, rq, dd, bb
+
+    print*, 'readin map projection from ', trim(filename)
+
+    ! get the projection information from finegrid netcdf file
+    iret = nf_open(trim(filename), NF_NOWRITE, ncstatic)
+    if (iret .ne. 0) then
+       print*, 'Problems when opening ', trim(filename), 'in lambcoord'
+       hires_flag = 0
+       call hydro_stop("lambcoord")
+    else
+       hires_flag = 1
+       print*, '****** readin lambert conformal conic projection  ******'
+    endif
+
+    if (hires_flag .eq. 1) then
+
+       iret = NF_INQ_VARID(ncstatic,'lambert_conformal_conic',varid)
+       if (iret .eq. 0) then
+          iret = NF_GET_ATT_INT(ncstatic,  varid, 'MAP_PROJ', map_proj)
+          iret = NF_GET_ATT_REAL(ncstatic, varid, 'longitude_of_central_meridian', reflon)
+          iret = NF_GET_ATT_REAL(ncstatic, varid, 'latitude_of_projection_origin', reflat)
+          iret = NF_GET_ATT_REAL(ncstatic, NF_GLOBAL, 'CEN_LON',   cenlon)
+          iret = NF_GET_ATT_REAL(ncstatic, NF_GLOBAL, 'CEN_LAT',   cenlat)
+          iret = NF_GET_ATT_REAL(ncstatic, varid, 'false_easting', offx)
+          iret = NF_GET_ATT_REAL(ncstatic, varid, 'false_northing', offy)
+       else
+          iret = NF_GET_ATT_INT(ncstatic,  NF_GLOBAL, 'MAP_PROJ', map_proj)
+          iret = NF_GET_ATT_REAL(ncstatic, NF_GLOBAL, 'STAND_LON', reflon)
+          iret = NF_GET_ATT_REAL(ncstatic, NF_GLOBAL, 'TRUELAT1',  reflat)
+          iret = NF_GET_ATT_REAL(ncstatic, NF_GLOBAL, 'CEN_LON',   cenlon)
+          iret = NF_GET_ATT_REAL(ncstatic, NF_GLOBAL, 'CEN_LAT',   cenlat)
+          iret = NF_GET_ATT_REAL(ncstatic, NF_GLOBAL, 'false_easting', offx)
+          iret = NF_GET_ATT_REAL(ncstatic, NF_GLOBAL, 'false_northing', offy)
+          if (map_proj .ne. 1) then
+             print*, 'Temporary the projection system in HYDRO must be '
+             print*, 'Lambert Conformali conic'
+          endif
+       endif
+    endif
+    iret = nf_close(ncstatic)
+
+    ! convert degree to radian
+    clmd0 = DBLE(reflon) * pi / 180.d0
+    cpsi0 = DBLE(reflat) * pi / 180.d0
+    xlatr = DBLE(cenlat) * pi / 180.d0
+    xlonr = DBLE(cenlon) * pi / 180.d0
+
+    xlat1 = DBLE(xlat) * pi / 180.d0
+    xlon1 = DBLE(xlon) * pi / 180.d0
+
+    ! calculate projected (x,y) for (cenlon,cenlat)  
+    qp = (1.d0-ee**2)* ( (1.d0        /(1.d0-ee**2               )) - &
+         ((1.d0/(2.d0*ee))*log((1.d0-ee           )/(1.d0+ee           ))))
+    qo = (1.d0-ee**2)*( (sin(cpsi0)/(1.d0-ee**2*(sin(cpsi0))**2)) - &
+         ((1.d0/(2.d0*ee))*log((1.d0-ee*sin(cpsi0))/(1.d0+ee*sin(cpsi0)))))
+    qq = (1.d0-ee**2)*( (sin(xlatr)/(1.d0-ee**2*(sin(xlatr))**2)) - &
+         ((1.d0/(2.d0*ee))*log((1.d0-ee*sin(xlatr))/(1.d0+ee*sin(xlatr)))))
+
+    betao = asin(qo/qp)
+    beta  = asin(qq/qp)
+    rq = earthr * (qp/2.d0) ** 0.5d0
+    dd = earthr * (cos(cpsi0)/(1.d0-ee**2*(sin(cpsi0))**2)**0.5d0) / &
+         ( rq*cos(betao) )
+    bb = rq * ( 2.d0/ (1.d0 + sin(betao)*sin(beta) +  &
+         ( cos(betao)*cos(beta)*cos(xlonr-clmd0) )) )**0.5d0
+
+    ! calculate distance of (cenlon,cenlat) from (reflon, reflat)
+    xr8 = DBLE(offx)*1.d3 + (bb*dd)*(cos(beta)*sin(xlonr-clmd0))
+    yr8 = DBLE(offy)*1.d3 + (bb/dd)*(cos(betao)*sin(beta) - &
+               (sin(betao)*cos(beta)*cos(xlonr-clmd0)) )
+
+
+    ! calculate projected (x,y) for (xlon,xlat)  
+    qp = (1.d0-ee**2)* ( (1.d0        /(1.d0-ee**2               )) - &
+         ((1.d0/(2.d0*ee))*log((1.d0-ee           )/(1.d0+ee           ))))
+    qo = (1.d0-ee**2)*( (sin(cpsi0)/(1.d0-ee**2*(sin(cpsi0))**2)) - &
+         ((1.d0/(2.d0*ee))*log((1.d0-ee*sin(cpsi0))/(1.d0+ee*sin(cpsi0)))))
+    qq = (1.d0-ee**2)*( (sin(xlat1)/(1.d0-ee**2*(sin(xlat1))**2)) - &
+         ((1.d0/(2.d0*ee))*log((1.d0-ee*sin(xlat1))/(1.d0+ee*sin(xlat1)))))
+
+    betao = asin(qo/qp)
+    beta  = asin(qq/qp)
+    rq = earthr * (qp/2.d0) ** 0.5d0
+    dd = earthr * (cos(cpsi0)/(1.d0-ee**2*(sin(cpsi0))**2)**0.5d0) / &
+         ( rq*cos(betao) )
+    bb = rq * ( 2.d0/ (1.d0 + sin(betao)*sin(beta) +  &
+         ( cos(betao)*cos(beta)*cos(xlon1-clmd0) )) )**0.5d0
+
+    ! calculate distance of (xlon,xlat) from (reflon, reflat)
+    xr81 = DBLE(offx)*1.d3 + (bb*dd)*(cos(beta)*sin(xlon1-clmd0))
+    yr81 = DBLE(offy)*1.d3 + (bb/dd)*(cos(betao)*sin(beta) - &
+               (sin(betao)*cos(beta)*cos(xlon1-clmd0)) )
+
+    ! calculate (i,j) of (xlon,xlat) in the domain (1:nx,1:ny)
+    x = REAL(xr81-xr8)/delgrd + 0.5*nx + 0.5
+    y = REAL(yr81-yr8)/delgrd + 0.5*ny + 0.5
+
+    ! print out if error exists 
+    if ( (x .lt. 0.) .or. (x .gt. REAL(nx)) .or. &
+         (y .lt. 0.) .or. (y .gt. REAL(ny))        ) then
+
+         print*, 'Warning in subr. lambcoord: transect point is out of domain bounds'
+         print*, 'lon & lat = ', xlon, xlat
+         print*, 'i   & j   = ', nint(x), nint(y)
+         call hydro_stop("lambcoord")
+
+    endif
+
+    RETURN
+
+end subroutine lambcoord_transect
+
+! ------------------------------------------------------------
+subroutine drive_OverlandChannelRouting( &
+     ix,         jx,          dx,            ltype     &
+     ,ielev,      elev,        bank,          rough,    &
+     width,      fbed,        fwater,        fsat,      &
+     hlake,      cgiflux,     cuiflux,       cglflux,   &
+     rsat,       runoff,      precip,        evap,      &
+     streamflux, istreamflux, dt,            istep,     &
+     dt_thrt,    method,      ntran,         ncross,    &
+     itran,      jtran,       ktran,         fluxtran,  &
+     fluxtranav, dt_flowtran, count_flowout, ac_ocnsf,  &
+     ac_fixsf,    ac_pmewsf,  ac_roff_grnd,  w_sf    ,  &
+     sdep                                               &                                        
+      )
+
+! DESCRIPTION:
+! To drive 2D Overland+Channle Routing
+! With activted 2D groundwater Routing, 
+! 	cgiflux, computed in flux_gw_chan 
+! 	cuiflux, computed in flux_gw_chan  
+! 	cglflux, computed in flux_gw_lake
+! 	fwater,  computed in fwater_cal
+! Uncoupled with groundwater, 
+! 	cgiflux = 0.
+!   cuiflux = 0.
+!   cglflux = 0.
+!   fwater is updated in this subroutine 
+
+     implicit none
+
+     INTEGER, INTENT(IN)                      :: ix         
+     INTEGER, INTENT(IN)                      :: jx
+     REAL,    INTENT(IN)                      :: dx         ! resolution, m
+     INTEGER, INTENT(IN),    DIMENSION(IX,JX) :: ltype      ! land surface type
+     INTEGER, INTENT(IN),    DIMENSION(IX,JX) :: ielev      ! sub-basin
+     REAL,    INTENT(IN),    DIMENSION(IX,JX) :: elev       ! hydrologic topography, m
+     REAL,    INTENT(IN),    DIMENSION(IX,JX) :: bank       ! channel/lake depth, m
+     REAL,    INTENT(IN),    DIMENSION(IX,JX) :: sdep       ! storage depth, m
+     REAL,    INTENT(IN),    DIMENSION(IX,JX) :: rough      ! Manning roughness
+     REAL,    INTENT(IN),    DIMENSION(IX,JX) :: width      ! stream width, m
+     REAL,    INTENT(IN),    DIMENSION(IX,JX) :: fbed       ! fractional area of streambed
+     REAL,    INTENT(INOUT), DIMENSION(IX,JX) :: fwater     ! fractional area of river/lake
+     REAL,    INTENT(IN),    DIMENSION(IX,JX) :: fsat       ! fractional area of saturated soil
+     REAL,    INTENT(INOUT), DIMENSION(IX,JX) :: hlake      ! water level of river/lake, m
+     REAL,OPTIONAL,INTENT(IN),DIMENSION(IX,JX):: cgiflux    ! flux, stream <-> aquifer, m/s
+     REAL,OPTIONAL,INTENT(IN),DIMENSION(IX,JX):: cuiflux    ! flux, stream -> unsaturated -> aquifer, m/s 
+     REAL,OPTIONAL,INTENT(IN),DIMENSION(IX,JX):: cglflux    ! flux, lake -> aquifer, m/s
+     REAL,OPTIONAL,INTENT(IN),DIMENSION(IX,JX):: rsat       ! saturation excess runoff, m/s
+     REAL,    INTENT(IN),    DIMENSION(IX,JX) :: runoff     ! infiltration excess runoff, m/s
+     REAL,    INTENT(IN),    DIMENSION(IX,JX) :: precip     ! precipitation rate, m/s
+     REAL,    INTENT(IN),    DIMENSION(IX,JX) :: evap       ! evaporation rate, m/s
+     REAL,    INTENT(INOUT), DIMENSION(IX,JX) :: streamflux ! stream flux out of cell, m3/s
+     INTEGER, INTENT(INOUT), DIMENSION(IX,JX) :: istreamflux! quadrant for stream flux (1=E, 2=NE, ..., 8=SE)
+     REAL,    INTENT(IN)                      :: dt         ! HYDRO timestep interval, sec. 
+     INTEGER, INTENT(IN)                      :: istep      ! current time step
+     REAL,    INTENT(IN)                      :: dt_thrt    ! interval for 2D terrain hydrologic routing, sec.
+     INTEGER, INTENT(IN)                      :: method     ! numerical method for 2D channel routing
+
+     ! For transect streamflux
+     INTEGER,           INTENT(IN)                        :: ntran  ! number of cross-section
+     INTEGER, OPTIONAL, INTENT(IN),  DIMENSION(ntran)     :: ncross ! number of grids contributing to transect flow
+     INTEGER, OPTIONAL, INTENT(IN),  DIMENSION(500,ntran) :: itran  
+     INTEGER, OPTIONAL, INTENT(IN),  DIMENSION(500,ntran) :: jtran
+     INTEGER, OPTIONAL, INTENT(IN),  DIMENSION(500,ntran) :: ktran
+     REAL,    OPTIONAL, INTENT(OUT), DIMENSION(ntran)     :: fluxtran      ! streamflow crossing specified transections
+     REAL,    OPTIONAL, INTENT(INOUT), DIMENSION(ntran)   :: fluxtranav    ! interval averaging streamflow of transections
+     REAL,    OPTIONAL, INTENT(IN)                        :: dt_flowtran   ! interval for output streamflow of transections
+     INTEGER, OPTIONAL, INTENT(INOUT)                     :: count_flowout ! count for output averaging streamflow
+
+     REAL,    SAVE,          ALLOCATABLE      :: fluxav(:)
+
+     ! For accumulated arrays
+     REAL,    INTENT(INOUT), DIMENSION(IX,JX) :: ac_ocnsf     ! accumulated water to ocean, m3
+     REAL,    INTENT(INOUT), DIMENSION(IX,JX) :: ac_fixsf     ! accumulated water to fix hlake, m3
+     REAL,    INTENT(INOUT), DIMENSION(IX,JX) :: ac_pmewsf    ! accumulated net rainfall(P-E) over water surface, m
+     REAL,    INTENT(INOUT), DIMENSION(IX,JX) :: ac_roff_grnd ! accumulated surface runoff at ground surface, m
+     REAL,    INTENT(INOUT), DIMENSION(IX,JX) :: w_sf         ! surface water storage, m
+
+#ifdef MPP_LAND
+     ! global VARIABLES
+     INTEGER,SAVE, ALLOCATABLE :: global_ltype(:,:)
+     REAL,   SAVE, ALLOCATABLE :: global_elev(:,:)
+     REAL,   SAVE, ALLOCATABLE :: global_fbed(:,:)
+     REAL,   SAVE, ALLOCATABLE :: global_bank(:,:)
+     REAL,   SAVE, ALLOCATABLE :: global_sdep(:,:)
+     REAL,   SAVE, ALLOCATABLE :: global_width(:,:)
+     REAL,   SAVE, ALLOCATABLE :: global_rough(:,:)
+     REAL,   ALLOCATABLE :: global_runoff(:,:)
+     REAL,   ALLOCATABLE :: global_fwater(:,:)
+     REAL,   ALLOCATABLE :: global_fsat(:,:)
+     REAL,   ALLOCATABLE :: global_precip(:,:)
+     REAL,   ALLOCATABLE :: global_evap(:,:)
+     REAL,   ALLOCATABLE :: global_hlake(:,:)
+     REAL,   ALLOCATABLE :: global_streamflux(:,:)
+     REAL,   ALLOCATABLE :: global_cgiflux(:,:)
+     REAL,   ALLOCATABLE :: global_cuiflux(:,:)
+     REAL,   ALLOCATABLE :: global_cglflux(:,:)
+     REAL,   ALLOCATABLE :: global_RSAT(:,:)
+     INTEGER,ALLOCATABLE :: global_istreamflux(:,:)
+     REAL,   ALLOCATABLE :: global_ac_ocnsf(:,:)
+     REAL,   ALLOCATABLE :: global_ac_fixsf(:,:)
+
+     REAL,    DIMENSION(global_rt_nx, global_rt_ny) :: fixsub, & 
+                                                       ocnsub
+#else
+     ! LOCAL VARIABLES
+     REAL,   DIMENSION(IX,JX) :: fixsub                     ! grid-scale hlake fix at sub-timestep, m3/s 
+     REAL,   DIMENSION(IX,JX) :: ocnsub                     ! grid-scale water flow to ocean, m3/s
+#endif
+
+     ! LOCAL VARIABLES
+     REAL,    ALLOCATABLE :: gstreamflux(:,:)
+     INTEGER, ALLOCATABLE :: gistreamflux(:,:)
+     REAL    :: enegsub                                     ! domain-scale hlake fix at sub-timestep, m3/s
+     REAL    :: totosub                                     ! streamflux into ocean at sub-timestep, m3/s
+     INTEGER :: i, j, k, m, n
+     INTEGER :: isub, nsub
+     REAL    :: zshift, ze, zb, zw, f
+     INTEGER :: idir
+
+     zshift = 1.E-10
+!      zshift =10.
+#ifdef MPP_LAND
+    call MPP_LAND_COM_REAL(hlake, ix, jx, 99)
+
+    if (my_id .eq. IO_id) then
+       if (istep .eq. 0) then
+          allocate(global_ltype(global_rt_nx, global_rt_ny))
+          allocate(global_elev(global_rt_nx, global_rt_ny)) 
+          allocate(global_fbed(global_rt_nx, global_rt_ny))
+          allocate(global_bank(global_rt_nx, global_rt_ny))
+          allocate(global_sdep(global_rt_nx, global_rt_ny))
+          allocate(global_width(global_rt_nx, global_rt_ny))
+          allocate(global_rough(global_rt_nx, global_rt_ny))
+       endif
+       allocate(global_runoff(global_rt_nx, global_rt_ny))
+       allocate(global_fwater(global_rt_nx, global_rt_ny))
+       allocate(global_fsat(global_rt_nx, global_rt_ny))
+       allocate(global_precip(global_rt_nx, global_rt_ny))
+       allocate(global_evap(global_rt_nx, global_rt_ny))
+       allocate(global_hlake(global_rt_nx, global_rt_ny))
+       allocate(global_streamflux(global_rt_nx, global_rt_ny))
+       allocate(global_istreamflux(global_rt_nx, global_rt_ny))
+       allocate(global_ac_ocnsf(global_rt_nx, global_rt_ny))
+       allocate(global_ac_fixsf(global_rt_nx, global_rt_ny))
+       if (present(cgiflux)) allocate(global_cgiflux(global_rt_nx, global_rt_ny))
+       if (present(cuiflux)) allocate(global_cuiflux(global_rt_nx, global_rt_ny)) 
+       if (present(cglflux)) allocate(global_cglflux(global_rt_nx, global_rt_ny))
+       if (present(rsat))    allocate(global_rsat(global_rt_nx, global_rt_ny))
+
+    else
+       if (istep .eq. 0) then      
+          allocate(global_ltype(1,1))
+          allocate(global_elev(1,1))
+          allocate(global_fbed(1,1))
+          allocate(global_bank(1,1))
+          allocate(global_sdep(1,1))
+          allocate(global_width(1,1))
+          allocate(global_rough(1,1))
+       endif
+       allocate(global_runoff(1,1))
+       allocate(global_fwater(1,1))
+       allocate(global_fsat(1,1))
+       allocate(global_precip(1,1))
+       allocate(global_evap(1,1))
+       allocate(global_hlake(1,1))
+       allocate(global_streamflux(1,1))
+       allocate(global_istreamflux(1,1))
+       allocate(global_ac_ocnsf(1,1))
+       allocate(global_ac_fixsf(1,1))
+       if (present(cgiflux)) allocate(global_cgiflux(1,1))
+       if (present(cuiflux)) allocate(global_cuiflux(1,1))
+       if (present(cglflux)) allocate(global_cglflux(1,1))
+       if (present(rsat))    allocate(global_rsat(1,1))
+    endif
+
+#endif
+
+    do j = 1, jx
+      do i = 1, ix
+         ze = elev(i,j)
+         zb = bank(i,j)
+         zw = hlake(i,j)
+         f  = fbed(i,j)
+         fwater(i,j) = f * max(0., zw-(ze-zb))/max(zshift, zw-(ze-zb)) + &
+	               (1.-f) * max(0., zw-ze)/max(zshift, zw-ze)
+
+      end do
+    end do
+
+#ifdef MPP_LAND
+       if (istep .eq. 0) then
+          call write_IO_rt_int (ltype, global_ltype)
+          call write_IO_rt_real(elev,  global_elev)
+          call write_IO_rt_real(fbed,  global_fbed)
+          call write_IO_rt_real(bank,  global_bank)
+          call write_IO_rt_real(sdep,  global_sdep)
+          call write_IO_rt_real(width, global_width)
+          call write_IO_rt_real(rough, global_rough)
+       endif
+       call write_IO_rt_real(runoff, global_runoff)
+       call write_IO_rt_real(fwater, global_fwater)
+       call write_IO_rt_real(fsat,   global_fsat)
+       call write_IO_rt_real(precip, global_precip)
+       call write_IO_rt_real(evap,   global_evap)
+       call write_IO_rt_real(hlake,  global_hlake)
+       call write_IO_rt_real(streamflux, global_streamflux)
+       call write_IO_rt_int(istreamflux, global_istreamflux)
+       call write_IO_rt_real(ac_ocnsf, global_ac_ocnsf)
+       call write_IO_rt_real(ac_fixsf, global_ac_fixsf)
+       if (present(cgiflux)) call write_IO_rt_real(cgiflux, global_cgiflux)
+       if (present(cuiflux)) call write_IO_rt_real(cuiflux, global_cuiflux)
+       if (present(cglflux)) call write_IO_rt_real(cglflux, global_cglflux)
+       if (present(rsat))    call write_IO_rt_real(rsat,    global_rsat)
+#endif
+
+    ! step Overland+Channel Routing, to calculate
+    ! rt2d(did)%hlake, rt2d(did)%streamflux, rt2d(did)%istreamflux,
+    ! number of sub-timestep for Routing
+    nsub = INT(dt/dt_thrt)
+
+#ifdef MPP_LAND
+
+    if (my_id .eq. IO_id) then
+
+       if (istep .eq. 0) then
+          global_runoff = 0.
+          global_precip = 0.
+          global_evap   = 0.
+          global_rsat   = 0.
+          global_cgiflux = 0.
+          global_cuiflux = 0.
+          global_cglflux = 0.
+
+       endif
+
+       do isub = 1, nsub
+
+          call OverlandChannelRouting( &
+               global_rt_nx, global_rt_ny,   dx,             global_ltype,  &
+               global_elev,  global_runoff,  global_fwater, &
+               global_fbed,  global_fsat,    global_precip,  global_evap,   &
+               global_bank,  global_width,   global_rough,   global_hlake,  &
+               global_streamflux,            global_istreamflux, &
+               enegsub,      totosub,        istep,     &
+               dt_thrt,      isub,           nsub,           method,        &
+               ocnsub,       fixsub,                  &
+               global_rsat,  global_cgiflux, global_cuiflux, global_cglflux, global_sdep)
+
+          do j = 1, global_rt_ny
+             do i = 1, global_rt_nx
+                ! accumulated water to ocean from rivers, m3
+                global_ac_ocnsf(i,j) = global_ac_ocnsf(i,j) + ocnsub(i,j) * dt_thrt
+
+                ! accumulated water to fix surface water level, m
+                global_ac_fixsf(i,j) = global_ac_fixsf(i,j) + fixsub(i,j) * dt_thrt
+             end do
+          end do
+
+       end do
+
+    endif
+
+    call decompose_RT_real(global_ac_ocnsf,    ac_ocnsf,   global_rt_nx, global_rt_ny, ix, jx)
+    call decompose_RT_real(global_ac_fixsf,    ac_fixsf,   global_rt_nx, global_rt_ny, ix, jx)
+    call decompose_RT_real(global_hlake,       hlake,      global_rt_nx, global_rt_ny, ix, jx)
+    call decompose_RT_real(global_streamflux,  streamflux, global_rt_nx, global_rt_ny, ix, jx)
+    call decompose_RT_int(global_istreamflux, istreamflux,global_rt_nx, global_rt_ny, ix, jx)
+
+#else
+    ! sub-timestep for 2D overland-channel routing 
+    do isub = 1, nsub
+      call OverlandChannelRouting( ix,          jx,       dx,       ltype,      &
+                                   elev,        runoff,   fwater,               &
+                                   fbed,        fsat,     precip,   evap,       &
+                                   bank,        width,    rough,    hlake,      &
+                                   streamflux,  istreamflux,                    &
+                                   enegsub,     totosub,  istep,                &
+                                   dt_thrt,     isub,     nsub,     method,     &
+                                   ocnsub,      fixsub,     &
+                                   rsat,        cgiflux,  cuiflux,  cglflux, sdep)
+
+      do j = 1, jx
+         do i = 1, ix  
+            ! accumulated water to ocean from rivers, m3
+            ac_ocnsf(i,j) = ac_ocnsf(i,j) + ocnsub(i,j) * dt_thrt
+
+            ! accumulated water to fix surface water level, m
+            ac_fixsf(i,j) = ac_fixsf(i,j) + fixsub(i,j) * dt_thrt 
+         end do
+      end do
+    end do
+#endif
+
+    ! for accumulated arrays
+    do j = 1, jx
+       do i = 1, ix
+          ! accumulated P-E over water surface, m
+!          ac_pmewsf(i,j) = ac_pmewsf(i,j) + (precip(i,j) - evap(i,j)) * &
+!                                            fbed(i,j) * dt
+          ac_pmewsf(i,j) = 0.  !
+
+          ! calculate surface water storage, m 
+          w_sf(i,j) = (max(hlake(i,j),elev(i,j))-elev(i,j)) + & 
+                      (min(hlake(i,j),elev(i,j))-(elev(i,j)-bank(i,j))) * fbed(i,j)
+
+       end do
+    end do
+
+    ! compute diagnostic streamflow crossing cross-sections
+    ! if transect(s) are specified
+    ! when looking along the transect from readin end-point #1 to #2, 
+    ! fluxes crossing the transect from left to right is defiend as positive, 
+    ! fluxes crossing the transect from right to legt is negative.
+
+    if (ntran .gt. 0) then
+#ifdef MPP_LAND
+       if (my_id .eq. IO_id) then
+          allocate(gstreamflux(global_rt_nx,global_rt_ny))
+          allocate(gistreamflux(global_rt_nx,global_rt_ny))
+          gstreamflux(1:global_rt_nx, 1:global_rt_ny)  = global_streamflux
+          gistreamflux(1:global_rt_nx, 1:global_rt_ny) = global_istreamflux
+       endif
+#else
+       allocate(gstreamflux(ix,jx))
+       allocate(gistreamflux(ix,jx))
+       gstreamflux(1:ix, 1:jx)  = streamflux
+       gistreamflux(1:ix, 1:jx) = istreamflux
+#endif
+    endif
+
+    ! allocate streamflow for grids 
+!    if (istep == 0) then
+!       allocate(fluxav(ntran))
+!       fluxav(1:3) = 0.
+!    endif
+
+    count_flowout = count_flowout + 1
+    if (ntran .gt. 0) then
+#ifdef MPP_LAND
+      if (my_id .eq. IO_id) then
+#endif
+      do n = 1, ntran 
+         fluxtran(n) = 0. 
+         if (ncross(n) .gt. 0) then       
+            do m = 1, ncross(n)
+               i = itran(m,n) 
+               j = jtran(m,n)
+               k = iabs(ktran(m,n))
+               if (gistreamflux(i,j) .eq. k) then
+                  idir = isign(1,ktran(m,n))
+                  fluxtran(n) = fluxtran(n) + idir * gstreamflux(i,j)
+              endif
+            end do
+         endif
+         fluxtranav(n) = fluxtranav(n) + fluxtran(n)
+      end do
+
+      ! accumulates streamflow for grids
+!      fluxav(1) = fluxav(1) + gstreamflux(30,16)
+!      fluxav(2) = fluxav(2) + gstreamflux(26,13)
+!      fluxav(3) = fluxav(3) + gstreamflux(22,12)
+
+      ! write out averaging-streamflow for transects
+      ! and reset fluxtranav(:) & count_flowout 
+      if ( (mod((real(istep+1))*dt, dt_flowtran) .le. 1.e-6) .or. (istep .eq. 0) )then
+         call flowtrans_output(count_flowout, istep, dt, dt_flowtran, ntran, fluxtranav)
+      endif
+#ifdef MPP_LAND
+      endif
+#endif
+
+    end if
+
+  end subroutine drive_OverlandChannelRouting
+
+! ------------------------------------------------------------
+  subroutine flowtrans_output(ncount, istep, dt, dt_flowtran, ntran, fluxsum)
+
+  ! To write out averaging-streamflow for specified transects
+
+    implicit none
+
+     integer, intent(inout)                   :: ncount
+     integer, intent(in)                      :: istep
+     real,    intent(in)                      :: dt  
+     real,    intent(in)                      :: dt_flowtran
+     integer, intent(in)                      :: ntran
+     real,    intent(inout), dimension(ntran) :: fluxsum
+
+     integer :: i
+     integer :: num_tranout
+     character(len=100) :: fmt1, fmt2
+     real, dimension(ntran) :: avflux 
+     
+     if (istep .eq. 0) then  
+
+        write(fmt1,'(a,a,i0,a,a)') '(','a10,',ntran, '(a10,I2)', ')'
+        open(UNIT=66, STATUS='REPLACE', FILE='streamflow_trans.txt')
+
+        write(66,*) "averaging streamflow (m3/s) for transects"
+        write(66,*) "output interval (second) for streamflow = ", dt_flowtran
+        write(66,*) "timestep interval (second) for HYDRO    = ", dt
+        write(66,*) "number of transects      = ", ntran
+        write(66,*) "======================================================="
+        write(66,trim(fmt1)) "Time No.", ('trans',i,i=1,ntran)
+
+        close(66)
+        return 
+     endif
+
+     num_tranout = (istep+1)/ncount 
+ 
+     do i = 1, ntran
+        avflux(i)  = fluxsum(i) / ncount
+        fluxsum(i) = 0.
+     end do
+     ncount = 0
+
+     write(fmt2,'(a,a,i0,a,a)') '(','I10,',ntran, 'e12.4', ')'
+     open(UNIT=66, POSITION='APPEND', FILE='streamflow_trans.txt')
+         write(66, trim(fmt2)) num_tranout, (avflux(i),i=1,ntran)
+     close(66)
+
+  end subroutine flowtrans_output
+
+! ------------------------------------------------------------
+  subroutine fwater_cal(did)
+
+  ! DESCRIPTION: 
+  ! To calculate the fractional area of surface area in grid, m2/m2
+
+    implicit none
+
+    INTEGER, INTENT(IN) :: did
+
+!   rt2d(did)%ix, i.e. RT_DOMAIN(did)%IXRT
+!   rt2d(did)%jx, i.e. RT_DOMAIN(did)%JXRT
+!   rt2d(did)%hlake(IXRT,JXRT)             ! elevation of water level in stream/lake, m
+!   rt2d(did)%fbed(IXRT,JXRT)              ! fractional area of streambed, m2/m2
+!   rt2d(did)%elev(IXRT,JXRT)              ! hydrologic topography, m
+!   rt2d(did)%bank(IXRT,JXRT)              ! depth of streambed, m
+!   rt2d(did)%fwater(IXRT,JXRT)            ! fractional area of water surface, m2/m2 
+
+    INTEGER :: i, j
+    REAL    :: zb, zw, ze, fbed
+    REAL    :: zshift
+
+    zshift = 1.E-10
+    do j = 1, rt2d(did)%jx
+       do i = 1, rt2d(did)%ix
+
+          ze = rt2d(did)%elev(i,j)
+          zb = rt2d(did)%bank(i,j)
+          zw = rt2d(did)%hlake(i,j)
+          fbed = rt2d(did)%fbed(i,j)
+
+          rt2d(did)%fwater(i,j) = fbed * max(0., zw-(ze-zb))/max(zshift, zw-(ze-zb)) + &
+                                  (1.-fbed) * max(0., zw-ze)/max(zshift, zw-ze)
+
+       end do
+    end do
+
+    RETURN
+  end subroutine fwater_cal
+
+! ------------------------------------------------------------
+  subroutine fsat_cal(did)
+
+  ! DESCRIPTION:
+  ! To calculate the fractional area of saturated soil in grid, m2/m2
+
+    implicit none
+
+    INTEGER, INTENT(IN) :: did
+
+!   rt2d(did)%ix, i.e. RT_DOMAIN(did)%IXRT
+!   rt2d(did)%jx, i.e. RT_DOMAIN(did)%JXRT
+!   rt2d(did)%hbeg(IXRT,JXRT)              ! groundwater head at the beginning of timestep, m
+!   rt2d(did)%fbed(IXRT,JXRT)              ! fractional area of streambed, m2/m2
+!   rt2d(did)%elev(IXRT,JXRT)              ! hydrologic topography, m
+!   rt2d(did)%bank(IXRT,JXRT)              ! depth of streambed, m
+!   rt2d(did)%fsat(IXRT,JXRT)              ! fractional area of saturated soil, m2/m2 
+
+    INTEGER :: i, j
+    REAL    :: zshift, ze, zb, zh
+
+    zshift = 1.E-10
+    do j = 1, rt2d(did)%jx
+       do i = 1, rt2d(did)%ix
+
+          ze = rt2d(did)%elev(i,j)
+          zb = ze - rt2d(did)%bank(i,j)
+          zh = rt2d(did)%hbeg(i,j)
+
+          if (zh .lt. zb-zshift) then            ! unsaturated
+             rt2d(did)%fsat(i,j) = 0.   
+
+          elseif (zh .lt. ze) then               ! only saturated below streambed
+             rt2d(did)%fsat(i,j) = rt2d(did)%fbed(i,j)
+
+          else                                   ! fully saturated
+             rt2d(did)%fsat(i,j) = 1.
+
+          endif
+
+       end do
+    end do
+
+    RETURN
+
+  end subroutine fsat_cal
+
+! ------------------------------------------------------------
+  subroutine flux_gw_chan (did, dt)
+
+! DESCRIPTION:
+! calculate the flux between groundwater and channel
+! cgiflux: positive flux, river/lake --> aquifer
+!          negative flux, aquifer --> river/lake
+! (1) for grids in the watershed, i.e. ltype == 1
+!	cgiflux = Ksat * dh / M_sbed
+!	connected groundwater and stream: 	dh = hlake - gwhead  
+!	disconnected groundwater and stream:  	dh = hlake - h_streambed
+! (2) for grids out of the watershed, i.e. ltype == -1
+!	cgiflux = - q_drain_max * exp(-f_drai * Z_gw) * 0.001
+!	q_drain_max: maximum groundwater drainage, = 5.5E-3 kg/(m2*s), 
+!		     determined by global simulations
+!	f_drai:      1./decay factor, 1/m; decay factor = 1/2.5 m
+!	Z_gw:        depth of groundwater head below land surface, 
+
+    implicit none
+
+    INTEGER, INTENT(IN)  :: did
+    REAL,    INTENT(IN)  :: dt
+
+!   rt2d(did)%ix, i.e. RT_DOMAIN(did)%IXRT 
+!   rt2d(did)%jx, i.e. RT_DOMAIN(did)%JXRT
+!   rt2d(did)%ltype(IXRT,JXRT)        ! land-sfc type
+!   rt2d(did)%elev(IXRT,JXRT)         ! hydrologic topography, m 
+!   rt2d(did)%sdelev(IXRT,JXRT)       ! standard deviation of elevation,   !!Cong,20190715
+!   rt2d(did)%ielev(IXRT,JXRT)        ! sub-basin
+!   rt2d(did)%hbeg(IXRT,JXRT)         ! groundwater head at the beginning of timestep, m
+!   rt2d(did)%hycond(IXRT,JXRT)       ! saturated hydraulic conductivity, m/s
+!   rt2d(did)%poros(IXRT,JXRT)        ! porosity, m3/m3
+!   rt2d(did)%hlake(IXRT,JXRT)        ! elevation of river/lake surface, m
+!   rt2d(did)%fbed(IXRT,JXRT)         ! fractional area of streambed, m2/m2
+!   rt2d(did)%bank(IXRT,JXRT)         ! depth of streambed/lakebed below local sf, m
+!   rt2d(did)%sbedthick(IXRT,JXRT)    ! thickness of streambed, m
+!   rt2d(did)%cgiflux(IXRT,JXRT)      ! flux, stream < - > groundwater zone, m/s
+!   rt2d(did)%cuiflux(IXRT,JXRT)      ! flux, stream -> unsaturated zone -> auqifer, m/s
+!   rt2d(did)%ac_cgi(IXRT,JXRT)       ! accumulated cgiflux*dt, m
+!   rt2d(did)%ac_cui(IXRT,JXRT)       ! accumulated cuiflux*dt, m 
+
+   ! LOCAL VARIABLES
+   INTEGER :: i, j
+   REAL    :: cgiflux_s, cuiflux_s &
+             ,cgiflux_o, cuiflux_o &!!Cong J,2019.08
+             ,cod_s,     cod_l     &
+             ,zb, zw, zshift, zb2  &
+             ,zw2, rlim
+   REAL    :: gwhead, elev, hlake, hycond, poros, fbed,bthick,sdelev
+   REAL    :: zgw, fff, rcod_s
+   REAL, PARAMETER :: hkdepth = 1./2.5 ! decay factor, m
+   REAL, PARAMETER :: qmax    = 5.5E-3 ! maximum groundwater drainage, kg/(m2*s) 
+
+   REAL, PARAMETER :: cod_s1  = 1./1.e7! Downstream,Remaining basin !Cong Jiang
+   REAL, PARAMETER :: cod_l1  = 1./1.e7
+ 
+   REAL, PARAMETER :: cod_s2  = 1./5.e6! Lanzhou
+   REAL, PARAMETER :: cod_l2  = 1./5.e6
+
+   REAL, PARAMETER :: cod_s3  = 1./1.e8! Toudaoguai
+   REAL, PARAMETER :: cod_l3  = 1./1.e8
+
+   REAL, PARAMETER :: cod_s4  = 1./5.e6! Huayuankou
+   REAL, PARAMETER :: cod_l4  = 1./5.e6 
+
+   zshift = 1.E-6
+   fff = 1./hkdepth
+
+   do j = 1, rt2d(did)%jx
+      do i = 1, rt2d(did)%ix
+
+         gwhead = rt2d(did)%hbeg(i,j)
+
+         ! ***********************************************************************
+         if (rt2d(did)%ltype(i,j) .eq. 1) then   ! land grids in Basin
+         ! ***********************************************************************
+
+            elev   = rt2d(did)%elev(i,j)
+            hlake  = rt2d(did)%hlake(i,j)
+            hycond = rt2d(did)%hycond(i,j) 
+            poros  = rt2d(did)%poros(i,j)
+            fbed   = rt2d(did)%fbed(i,j)
+            bthick = rt2d(did)%sbedthick(i,j)!Cong,
+            sdelev = rt2d(did)%sdelev(i,j)
+!            zshift = 30.*(1.-exp(-sdelev/30.)) 
+!            zshift = 50.*(1.-exp(-sdelev/50.))           
+!!!print*,sdelev
+
+! QIAN, to use Qian's scheme
+            cod_s  = (rt2d(did)%hycond_g(i,j))/(rt2d(did)%sbedthick(i,j))
+            cod_l  = (rt2d(did)%hycond_u(i,j))/(rt2d(did)%sbedthick(i,j))       ! q = k * dh / M
+!print*,cod_s, "congjiang"
+! QIAN, to use Limin's parameter values
+!            if (rt2d(did)%ielev(i,j) == 1) then
+!               cod_s = cod_s1
+!               cod_l = cod_l1
+!            elseif (rt2d(did)%ielev(i,j) == 2) then
+!               cod_s = cod_s2
+!               cod_l = cod_l2
+!            elseif (rt2d(did)%ielev(i,j) == 3) then
+!                cod_s = cod_s3
+!                cod_l = cod_l3
+!            elseif (rt2d(did)%ielev(i,j) == 4) then
+!               cod_s = cod_s4
+!               cod_l = cod_l4
+!            else
+!               cod_s = hycond
+!               cod_l = hycond
+!            endif
+
+            ! ~~~~~~~~~~~~~~~~~~
+            ! Within streambed
+            ! ~~~~~~~~~~~~~~~~~~
+            zb = elev - rt2d(did)%bank(i,j)                  ! elevation of streambed
+            zw = max(hlake, zb)                              ! elevation of stream surface
+
+            zb2 = zb - zshift
+            zw2 = zw - zshift
+
+ ! limin for change the amount of cgiflux
+ 
+ !                 if ((zw2-gwhead).lt. 0.) then  !climin
+ !                 rcod_s = 0.1
+ !                 else
+ !                 rcod_s= 1
+ !                 endif
+
+            if (gwhead .lt. zb2) then                        ! stream -> aquifer
+              ! groundwater head < streambed
+              cgiflux_s = 0.
+              cuiflux_s = cod_s * (zw-zb)!! *bthick !!!!Cong ,201904, activate cuiflux,0520,cod_l !Congj
+              rlim = abs(zw - zb) / dt   !!Cong,poros,20190523          
+              cuiflux_s = min(rlim, cuiflux_s)  
+              cuiflux_s = 0.  !!
+
+              elseif (gwhead .lt. elev) then                   ! stream <-> aquifer
+              ! streambed <= groundwater head  < elevation
+              cgiflux_s = cod_s * (zw2 - gwhead)!!!!!!Cong J,201908 
+              rlim = abs(zw2 - gwhead) * poros / dt
+              cgiflux_s = max(-rlim, min(rlim, cgiflux_s))
+
+!!               cgiflux_s = - cod_s * max(0., gwhead - zw) !Cong ,201904
+!!               rlim = max(0., gwhead - zw) * (poros - rt_domain(did)%SMCREFRT(i,j,1))/dt
+!!               rlim = max(0., gwhead - zw) * poros /dt
+!!               cgiflux_s = max(-rlim, cgiflux_s) 
+             cuiflux_s = 0.
+
+            else
+              ! groundwater head >= elevation
+              !Lake, with groundwater head at or above streambed:
+              if (zw2 .lt. elev ) then                        ! stream <-> aquifer
+                 cgiflux_s = cod_s * (hlake - gwhead)
+                 rlim = abs(zw2 - gwhead)*poros/dt
+                 cgiflux_s = max(-rlim, min(rlim, cgiflux_s))
+              else
+                 cgiflux_s = 0.  ! lake
+              endif
+             ! handled by "lake overburden" in hydrol
+               
+              cuiflux_s = 0.
+            endif
+!            cgiflux_s = 0.    !!Cong,test
+!            cuiflux_s = 0.
+!!---------------------------
+!! Land (outside streambeds): 
+!!---------------------------
+
+!            write(ioterm,'(/a)') 'fluxcomput'
+            zb = elev              ! elev of land
+            zw = max (hlake,zb)    ! elev of stream/lake surface
+
+!------------------------------------
+            if (gwhead.lt.zb) then
+!------------------------------------
+
+!                Land, with groundwater head below land surface:
+
+              if (zw.eq.zb) then
+                cuiflux_o = 0.                            ! running strm
+              else
+                cuiflux_o = cod_l * (zw-zb)               ! lake -> u.z.  !cod_l Cong J,2019.08
+              endif
+
+              cgiflux_o = 0.
+
+!---------------
+            else
+!---------------
+
+!               Land, with groundwater head at or above land surface:
+
+!cold(7/01)    cgiflux_o  = cod_l * (zw-head(i,j))          ! lake <-> gw
+              cgiflux_o  = 0. ! handled by "lake overburden" in hydrol
+              cuiflux_o  = 0.
+
+!----------------
+            endif
+!----------------
+!            rt2d(did)%cgiflux(i,j) = fbed * cgiflux_s + (1. - fbed) * cgiflux_o
+		    ! new scheme for dvolug & surface water source on 2017.05.11
+		    !Cong,2019.04,cgiflux 
+            rt2d(did)%cgiflux(i,j) = fbed * (cgiflux_s+ cuiflux_s)+(1. - fbed) * (cgiflux_o+cuiflux_o)  !!Cong, unknow 
+            rt2d(did)%cuiflux(i,j) = 0.    !!cong, 0520
+!          rt2d(did)%cuiflux(i,j) = 0.  !!fbed * cuiflux_s !cuiflux:stream--> unsatured soil --> groundwater
+!          if ( (rt2d(did)%hlake(i,j) .le. rt2d(did)%elev(i,j))  .and. &
+!               (rt2d(did)%hbeg(i,j)  .eq. rt2d(did)%hlake(i,j))       &
+!             ) then
+!             rt2d(did)%cgiflux(i,j) = 0.
+!          else
+!             if (gwhead .ge. zb - 10.) then
+!                rt2d(did)%cgiflux(i,j) = - cod_s
+!             else
+!                rt2d(did)%cgiflux(i,j) = 0.
+!             endif
+
+!             rt2d(did)%cgiflux(i,j) = - cod_s 
+!            zgw = max(0., rt2d(did)%elev(i,j) - gwhead)
+!            rt2d(did)%cgiflux(i,j) = - 0.001 * qmax * exp(- fff * zgw)
+!            rt2d(did)%cgiflux(i,j) = - 0.001 * qmax
+!          endif
+
+          ! ***********************************************************************
+          elseif (rt2d(did)%ltype(i,j) .eq. -1) then  ! land grids out of Basin
+          ! ***********************************************************************
+         
+!            zgw = max(0., rt2d(did)%elev(i,j) - gwhead)
+!            rt2d(did)%cgiflux(i,j) = - 0.001 * qmax * exp(- fff * zgw)
+
+            rt2d(did)%cgiflux(i,j) = 0.
+            rt2d(did)%cuiflux(i,j) = 0.
+
+          ! ***********************************************************************
+          else   ! ocean connected with Basin OR ocean unconnected with Basin 
+          ! ***********************************************************************
+            rt2d(did)%cgiflux(i,j) = 0.
+            rt2d(did)%cuiflux(i,j) = 0.
+          endif
+ 
+          rt2d(did)%ac_cgi(i,j) = rt2d(did)%ac_cgi(i,j) + rt2d(did)%cgiflux(i,j) * dt
+          rt2d(did)%ac_cui(i,j) = rt2d(did)%ac_cui(i,j) + rt2d(did)%cuiflux(i,j) * dt  
+         
+      end do
+   end do
+
+   RETURN
+  end subroutine flux_gw_chan
+
+! ---------------------------------------------------------------
+  subroutine flux_gw_lake(did, dt)
+
+! DESCRIPTION:
+! cgiflux: for lake (head(i,j) = hlake(i,j), and head(i,j) >= elev(i,j)), 
+!          the change of groundwater, cglflux, belongs to lake inflow
+!          +, from lake to aquifer
+!          -, from aquifer to lake
+    implicit none
+
+    INTEGER, INTENT(IN)  :: did
+    REAL,    INTENT(IN)  :: dt
+
+!   rt2d(did)%ix, i.e. RT_DOMAIN(did)%IXRT 
+!   rt2d(did)%jx, i.e. RT_DOMAIN(did)%JXRT
+!   rt2d(did)%ltype(IXRT,JXRT)        ! land-sfc type
+!   rt2d(did)%elev(IXRT,JXRT)         ! hydrologic topography, m
+!   rt2d(did)%hbeg(IXRT,JXRT)         ! groundwater head at the beginning of timestep, m
+!   rt2d(did)%hend(IXRT,JXRT)         ! groundwater head at the end of timestep, m 
+!   rt2d(did)%cglflux(IXRT,JXRT)      ! flux, aquifer <-> lake (+ to aquifer), m/s
+!   rt2d(did)%ac_cgl(IXRT,JXRT)       ! accumulated cglflux*dt, m
+
+    INTEGER  :: i, j
+
+    do j = 1, rt2d(did)%jx
+       do i = 1, rt2d(did)%ix
+
+          if (rt2d(did)%ltype(i,j) .eq. 1) then
+
+             rt2d(did)%cglflux(i,j) = (  max(rt2d(did)%hbeg(i,j), rt2d(did)%elev(i,j)) &
+                                       - max(rt2d(did)%hend(i,j), rt2d(did)%elev(i,j)) &
+                                      ) / dt
+
+          else
+             rt2d(did)%cglflux(i,j) = 0.
+          endif
+
+          rt2d(did)%ac_cgl(i,j) = rt2d(did)%ac_cgl(i,j) + rt2d(did)%cglflux(i,j) * dt
+
+       end do
+    end do
+
+    RETURN
+  end subroutine flux_gw_lake
+
+! ---------------------------------------------------------------
+  subroutine dvolgw_cal(did, dt)
+
+!   DESCRIPTION:
+!   This subroutine is to calculate change of groundwater storage  
+
+    implicit none
+
+    INTEGER, INTENT(IN) :: did
+    REAL,    INTENT(IN) :: dt
+
+!   rt2d(did)%ix, i.e. RT_DOMAIN(did)%IXRT
+!   rt2d(did)%jx, i.e. RT_DOMAIN(did)%JXRT
+!   rt2d(did)%ltype(IXRT,JXRT)               ! land surface type
+!   rt2d(did)%sinfil(IXRT,JXRT)              ! soil drainage rate, m/s (+ to aquifer)
+!   rt2d(did)%cgiflux(IXRT,JXRT)             ! flux, aquifer <-> stream, m/s
+!   rt2d(did)%cuiflux(IXRT,JXRT)             ! flux, stream -> unsaturated zone -> aquifer, m/s
+!   rt2d(did)%cglflux(IXRT,JXRT)             ! flux, aquifer -> lake, m/s
+!   gw2d(did)%convgw(IXRT,JXRT)              ! flux, horizontal groudnwater movement, m/s
+!   rt2d(did)%fwater(IXRT,JXRT)              ! fractional area of surface water, m2/m2
+!   rt2d(did)%fsat(IXRT,JXRT)                ! fractional area of saturated soil, m2/m2
+!   rt2d(did)%fbed(IXRT,JXRT)                ! fractional area of streambed, m2/m2
+!   rt2d(did)%dvolgw(IXRT,JXRT)              ! water storage change in the aquifer , m
+!   rt2d(did)%ac_infil_grnd(IXRT,JXRT)       ! accumulated soil infiltration at soil surface, m 
+!   rt2d(did)%ac_drain_grnd(IXRT,JXRT)       ! accumulated soil drainage to groundwater, m
+
+    INTEGER :: i, j
+    REAL    :: f
+
+    do j = 1, rt2d(did)%jx
+       do i = 1, rt2d(did)%ix
+
+         if (     rt2d(did)%ltype(i,j) .eq.  1 &
+             .or. rt2d(did)%ltype(i,j) .eq. -1 &
+            ) then
+            ! for studied volgw(i,j) changes because 
+            ! groundwater moves horizontally, and
+            ! connects with surface water, and
+            ! interact with unsaturated soil column 
+
+!             f = min(rt2d(did)%fsat(i,j), rt2d(did)%fbed(i,j))
+             f = rt2d(did)%fbed(i,j)
+ 
+!             rt2d(did)%dvolgw(i,j) = (rt2d(did)%sinfil(i,j) + &
+!                                      rt2d(did)%cgiflux(i,j)/max(1.E-6, (1.0-f))) * dt
+            
+!             rt2d(did)%dvolgw(i,j) = rt2d(did)%dvolgw(i,j) + rt2d(did)%cglflux(i,j) * dt
+
+             rt2d(did)%dvolgw(i,j) = ( rt2d(did)%sinfil(i,j) + rt2d(did)%cgiflux(i,j) + &
+                                   +rt2d(did)%cuiflux(i,j) +rt2d(did)%cglflux(i,j) ) * dt !!Cong,20190516
+      
+             if (nlst_rt(did)%gwBaseSwCRT .eq. 3) &
+             rt2d(did)%dvolgw(i,j) = rt2d(did)%dvolgw(i,j) + gw2d(did)%convgw(i,j) * dt
+ 
+         else
+             rt2d(did)%dvolgw(i,j) = 0.0
+         endif
+
+       end do
+    end do
+
+    RETURN
+  end subroutine dvolgw_cal
+
+! ---------------------------------------------------------------
+  subroutine ini_smois(did)
+    implicit none
+
+    ! DESCRIPTION:
+    ! To initialize the soil moisture based on groundwater head
+
+    INTEGER, INTENT(IN) :: did
+
+     ! rt2d(did)%ix
+     ! rt2d(did)%jx
+     ! nsoil = nlst_rt(did)%nsoil                 ! number of soil layer
+     ! rt2d(did)%hbeg(ixrt,jxrt)                  ! groundwater head at the end of last timestep, m
+     ! rt2d(did)%elev(ixrt,jxrt)                  ! hydrologic topography, m
+     ! RT_DOMAIN(did)%SMCRT(ixrt,jxrt,nsoil)      ! iliquid volumetric soil water content, m3/m3
+     ! RT_DOMAIN(did)%SICERT(ixrt,jxrt,nsoil)     ! iced volumetric water content, m3/m3
+     ! RT_DOMAIN(did)%SMCMAXRT(ixrt,jxrt,nsoil)   ! efficient porosity,  m3/m3 
+     ! RT_DOMAIN(did)%SOLDEPRT                    ! thickness of soil column, m
+     ! RT_DOMAIN(did)%SMCSATRT(ixrt,jxrt)         ! porosity, m3/m3
+     ! RT_DOMAIN(did)%SUCSATRT(ixrt,jxrt)         ! saturated suction, m
+     ! RT_DOMAIN(did)%BSWRT(ixrt,jxrt)            ! Clapp and Hornberger 'b' 
+     ! nlst_rt(did)%zsoil8(nsoil)                 ! depth of center soil layer, m (negative)
+     ! nlst_rt(did)%dzsoil(nsoil)                 ! depth of soil layer thichkness, m
+
+     ! LOCAL VARIABLES
+     INTEGER :: i, j, k
+     INTEGER :: nsoil                             ! number of soil layer
+     INTEGER :: kwt                               ! number of soil layer in which groundwater head locates
+     REAL    :: zwt                               ! depth of groundwater head, m
+     REAL,    DIMENSION(nlst_rt(did)%nsoil) :: dz, zu, zl
+     REAL(kind=8) :: wsoi                         ! water content of soil layers, m
+     REAL         :: bsw, suction, poros
+
+     ! number of soil layer
+     nsoil  = nlst_rt(did)%nsoil
+
+     ! depth of soil layer thickness, dz
+     do k = 1, nsoil
+        dz(k) = nlst_rt(did)%dzsoil(k)
+     end do
+
+     ! depth of lower boundary of soil layer, zl
+     ! depth of upper boundary of soil layer, zu
+     zl(1)   = dz(1)
+     zu(1)   = 0.
+     do k = 2, nsoil
+        zl(k) = zl(k-1) + dz(k)
+        zu(k) = zl(k-1)
+     end do
+
+     ! ###### update groundwater & soil moisture######
+     do j = 1, rt2d(did)%jx
+       do i = 1, rt2d(did)%ix
+
+           ! porosity
+           poros = RT_DOMAIN(did)%SMCSATRT(i,j)
+
+           if ((rt2d(did)%ltype(i,j) == 1) .or. (rt2d(did)%ltype(i,j) == -1)) then   ! land grids
+
+              ! depth of groundwater head
+              zwt = max(0.,rt2d(did)%elev(i,j) - rt2d(did)%hbeg(i,j))
+              
+              ! bsw & suction
+              bsw = RT_DOMAIN(did)%BSWRT(i,j)
+              suction = RT_DOMAIN(did)%SUCSATRT(i,j)
+
+              ! initialize soil moisture for soil layers
+              do k = 1, nsoil
+                 call gwhead2vol(wsoi, DBLE(zwt), DBLE(zu(k)), DBLE(zl(k)), DBLE(bsw), DBLE(suction), DBLE(poros))
+                 RT_DOMAIN(did)%SMCRT(i,j,k)  = min(poros, REAL(wsoi) / dz(k))
+                 RT_DOMAIN(did)%SICERT(i,j,k) = 0.                
+              end do
+
+           else                                                                       ! ocean grids
+              RT_DOMAIN(did)%SMCRT(i,j,:)  = poros
+              RT_DOMAIN(did)%SICERT(i,j,:) = 0.
+           endif
+
+       end do
+     end do
+
+  end subroutine ini_smois
+
+! ---------------------------------------------------------------
+  subroutine ini_water_storage(did)      
+     implicit none
+
+     ! DESCRIPTION:
+     ! To initialize water storage in unsaturated soil zone, and
+     ! water storage in saturated soil zone, 
+     ! from groundwater head to virtual groundwater head bottom 
+
+     INTEGER, INTENT(IN) :: did
+
+     ! rt2d(did)%ix                               ! RT_DOMAIN(did)%IXRT
+     ! rt2d(did)%jx                               ! RT_DOMAIN(did)%JXRT
+     ! nsoil = nlst_rt(did)%nsoil                 ! number of soil layer
+     ! rt2d(did)%elev(ixrt,jxrt)                  ! hydrologic topography, m
+     ! rt2d(did)%bot(ixrt,jxrt)                   ! lowest groundwater head, m 
+     ! rt2d(did)%zhead(ixrt,jxrt)                 ! depth of groundwater head, m
+     ! RT_DOMAIN(did)%SMCRT(ixrt,jxrt,nsoil)      ! liquid volumetric water content, m3/m3
+     ! RT_DOMAIN(did)%SICERT(ixrt,jxrt,nsoil)     ! iced volumetric water content, m3/m3
+     ! RT_DOMAIN(did)%SMCMAXRT(ixrt,jxrt,nsoil)   ! efficient porosity,  m3/m3 
+     ! RT_DOMAIN(did)%SMCSATRT(ixrt,jxrt)         ! porosity, m3/m3
+     ! RT_DOMAIN(did)%SUCSATRT(ixrt,jxrt)         ! saturated suction, m
+     ! RT_DOMAIN(did)%BSWRT(ixrt,jxrt)            ! Clapp and Hornberger 'b' 
+     ! nlst_rt(did)%dzsoil(nsoil)                 ! depth of soil layer thichkness, m
+     ! rt2d(did)%w_us(ixrt,jxrt)                  ! water content of unsaturated soil water, m
+     ! rt2d(did)%w_gw(ixrt,jxrt)                  ! water content of groundwater, m
+     ! rt2d(did)%volaq(ixrt,jxrt)                 ! water storage in aquifer, m
+
+     ! LOCAL VARIABLES
+     INTEGER :: i, j, k
+     INTEGER :: nsoil                             ! number of soil layer
+     INTEGER :: kwt                               ! number of soil layer in which groundwater head locates
+     REAL    :: zwt                               ! depth of groundwater head, m
+!     REAL    :: w_us_s, w_us_w                    ! water storage in unsaturated soil, m
+!     REAL    :: w_gw_s, w_gw_w                    ! water storage between groundwater head and virtual bottom, m
+     REAL    :: zbot                              ! depth of virtual groundwater bottom     
+     REAL    :: zbed                              ! depth of stream bed
+     REAL    :: fbed                              ! fractional streambed area, m2/m2 
+     REAL, DIMENSION(nlst_rt(did)%nsoil+1) :: dz, zu, zl
+     REAL(kind=8), DIMENSION(nlst_rt(did)%nsoil+1) :: wsoi     ! water content of soil layers, m
+     REAL    :: bsw, suction, poros, f, wus_tmp
+
+     ! number of soil layer
+     nsoil  = nlst_rt(did)%nsoil
+
+     ! depth of soil layer thickness, dz
+     do k = 1, nsoil
+        dz(k) = nlst_rt(did)%dzsoil(k)
+     end do
+
+     ! depth of lower boundary of soil layer, zl
+     ! depth of upper boundary of soil layer, zu
+     zl(1)   = dz(1)
+     zu(1)   = 0.
+     do k = 2, nsoil
+        zl(k) = zl(k-1) + dz(k)
+        zu(k) = zl(k-1)
+     end do
+
+     ! ###### update groundwater & soil moisture######
+     do j = 1, rt2d(did)%jx
+       do i = 1, rt2d(did)%ix
+           ! soil properties
+           poros = RT_DOMAIN(did)%SMCSATRT(i,j)
+
+           ! (nsoil+1) layer
+           zbot = max(0., rt2d(did)%elev(i,j) - rt2d(did)%bot(i,j))
+           zl(nsoil+1) = zbot
+           zu(nsoil+1) = zl(nsoil)
+           dz(nsoil+1) = zl(nsoil+1) - zu(nsoil+1)
+
+           if ((rt2d(did)%ltype(i,j) == 1) .or. (rt2d(did)%ltype(i,j) == -1)) then   ! land grids
+
+              ! state variables
+              zwt  = max(0., rt2d(did)%zhead(i,j))
+              zbed = rt2d(did)%bank(i,j)
+              fbed = rt2d(did)%fbed(i,j) 
+
+              ! bsw & suction
+              bsw     = RT_DOMAIN(did)%BSWRT(i,j)
+              suction = RT_DOMAIN(did)%SUCSATRT(i,j)
+
+              ! kwt is the number of the soil layer in which groundwater head locates
+              kwt = nsoil + 1
+              do k = nsoil, 1, -1
+                 if ((zwt .ge. zu(k)) .and. (zwt .lt. zl(k))) then
+                    kwt = k
+                    exit
+                 endif
+              end do
+
+              ! soil water in soil layers
+              do k = 1, nsoil
+                 wsoi(k) = DBLE(( RT_DOMAIN(did)%SMCRT(i,j,k)  + & 
+                                  RT_DOMAIN(did)%SICERT(i,j,k) ) * dz(k))
+              end do
+
+              ! soil water below soil column
+              k = nsoil+1
+              if (kwt .le. nsoil) then
+                 wsoi(k) = DBLE(poros * dz(k))
+                 wus_tmp = 0.d0
+              else
+                 call gwhead2vol(wsoi(k), DBLE(zwt), DBLE(zu(k)), DBLE(zl(k)), DBLE(bsw), DBLE(suction), DBLE(poros))
+              endif
+              rt2d(did)%volaq(i,j) = wsoi(k)
+              wus_tmp = REAL(rt2d(did)%volaq(i,j)) - (zl(k)-max(zwt,zu(k))) * poros
+              wus_tmp = max(0., wus_tmp)
+
+              ! calculate water storage in unsaturated soil and saturated soil 
+!              call water_storage_s(nsoil+1, kwt, zwt,    fbed, poros, zbed, REAL(wsoi), REAL(wus_tmp), &
+!                                   zl,      zu,  w_us_s, w_gw_s)
+!              call water_storage_w(nsoil+1, kwt, zwt,    fbed, poros, zbed, REAL(wsoi), zl, zu, w_us_w, w_gw_w,i,j) 
+
+              call water_storage_cal(nsoil+1, kwt, zwt, poros, REAL(wsoi), REAL(wus_tmp), &
+                                     zl,      zu,  rt2d(did)%w_us(i,j), rt2d(did)%w_gw(i,j)) 
+
+!              rt2d(did)%w_us(i,j) = w_us_s + w_us_w
+!              rt2d(did)%w_gw(i,j) = w_gw_s + w_gw_w
+
+           else                                                                    ! ocean grids
+              rt2d(did)%w_us(i,j)  = 0.
+              rt2d(did)%w_gw(i,j)  = poros * zbot
+              rt2d(did)%volaq(i,j) = 0.d0
+
+           endif
+
+       end do
+     end do
+
+  end subroutine ini_water_storage
+
+! ---------------------------------------------------------------
+  subroutine water_storage_cal(nlayer, kwt, zhead, poros, wsoi, &
+                               w_us_last, zl, zu, w_us, w_gw)
+    implicit none
+
+    ! DESCRIPTION:
+    ! To calculate unsaturated soil water storage and groundwater storage
+    ! for each grid cell
+
+    INTEGER,      INTENT(IN) :: nlayer        ! number of layers
+    INTEGER,      INTENT(IN) :: kwt           ! soil layer in which groundwater head locates
+    REAL,         INTENT(IN) :: zhead         ! depth of groundwater head, m
+    REAL,         INTENT(IN) :: poros         ! porosity, m3/m3
+    REAL,         INTENT(IN) :: wsoi(nlayer)  ! water content in soil layers, m
+    REAL,         INTENT(IN) :: w_us_last     ! unsaturated soil water in last layer, m
+    REAL,         INTENT(IN) :: zl(nlayer)    ! depth of soil layer lower boundary, m
+    REAL,         INTENT(IN) :: zu(nlayer)    ! depth of soil layer upper boundary, m
+    REAL,         INTENT(OUT):: w_us          ! unsaturated soil water storage, m
+    REAL,         INTENT(OUT):: w_gw          ! groundwater storage, m
+
+    INTEGER :: k
+
+    w_us = 0.
+    w_gw = 0.
+
+    ! unsaturated soil water storage for whole grid cell
+    do k = 1, kwt-1
+       w_us = w_us + wsoi(k)
+    end do
+    if (kwt .le. nlayer-1) then
+       w_us = w_us + wsoi(kwt) - max(0., zl(kwt) - zhead) * poros
+    else
+       w_us = w_us + w_us_last
+    endif
+
+    ! groundwater storage for whole grid cell 
+    w_gw = max(0., zl(kwt) - zhead) * poros
+    do k = kwt+1, nlayer
+       w_gw = w_gw + wsoi(k)
+    end do
+
+    return
+  end subroutine water_storage_cal
+
+! ---------------------------------------------------------------
+  subroutine water_storage_s(nlayer, kwt, zhead, fbed,   poros, zbank, &
+                             wsoi,   w_us_last,  zl, zu, w_us_s, w_gw_s )
+    implicit none
+
+    ! DESCRIPTION:
+    ! To calculate unsaturated soil water storage and groundwater storage
+    ! for soil column (non-stream column)
+
+    INTEGER,      INTENT(IN) :: nlayer        ! number of layers
+    INTEGER,      INTENT(IN) :: kwt           ! soil layer in which groundwater head locates
+    REAL,         INTENT(IN) :: zhead         ! depth of groundwater head, m
+    REAL,         INTENT(IN) :: fbed          ! fractional area of steambed area, m2/m2
+    REAL,         INTENT(IN) :: poros         ! porosity, m3/m3
+    REAL,         INTENT(IN) :: zbank         ! depth of streambed below ground surface, m
+    REAL,         INTENT(IN) :: wsoi(nlayer)  ! water content in soil layers, m
+    REAL,         INTENT(IN) :: w_us_last     ! unsaturated soil water in last layer, m
+    REAL,         INTENT(IN) :: zl(nlayer)    ! depth of soil layer lower boundary, m
+    REAL,         INTENT(IN) :: zu(nlayer)    ! depth of soil layer upper boundary, m
+    REAL,         INTENT(OUT):: w_us_s        ! unsaturated soil water storage of soil column, m
+    REAL,         INTENT(OUT):: w_gw_s        ! groundwater storage of soil column, m
+
+    INTEGER :: k
+
+    w_us_s = 0.
+    w_gw_s = 0.
+
+    ! unsaturated soil water storage for soil column
+    if (.false.) then
+    do k = 1, kwt - 1
+       w_us_s = w_us_s + wsoi(k)
+    end do
+    w_us_s = w_us_s + wsoi(kwt) - max(0., zl(kwt) - zhead) * poros
+    w_us_s = w_us_s * (1.-fbed)
+
+    ! groundwater storage for soil column
+    w_gw_s = max(0., zl(kwt) - zhead) * poros
+    do k = kwt+1, nlayer
+       w_gw_s = w_gw_s + wsoi(k)
+    end do
+    w_gw_s = w_gw_s * (1.-fbed)
+    endif
+
+    ! unsaturated soil water storage for soil column
+    do k = 1, kwt-1
+       w_us_s = w_us_s + wsoi(k)
+    end do
+    if (kwt .le. nlayer-1) then
+       w_us_s = w_us_s + wsoi(kwt) - max(0., zl(kwt) - zhead) * poros
+    else
+       w_us_s = w_us_s + w_us_last       
+    endif
+    w_us_s = w_us_s * (1.-fbed)
+
+    ! groundwater storage for soil column 
+    w_gw_s = max(0., zl(kwt) - zhead) * poros
+    do k = kwt+1, nlayer
+       w_gw_s = w_gw_s + wsoi(k)
+    end do
+    w_gw_s = w_gw_s * (1.-fbed)
+
+    end subroutine water_storage_s
+
+! ---------------------------------------------------------------
+  subroutine water_storage_w(nlayer, kwt, zhead, fbed,   poros, zbank, &
+                             wsoi,   zl,  zu,    w_us_w, w_gw_w,i,j )
+    implicit none
+
+    ! DESCRIPTION:
+    ! To calculate the unsaturated soil water storage and groundwater storage
+    ! for water column (stream column)
+
+    INTEGER,      INTENT(IN) :: nlayer        ! number of layers
+    INTEGER,      INTENT(IN) :: kwt           ! soil layer in which groundwater head locates
+    REAL,         INTENT(IN) :: zhead         ! depth of groundwater head, m
+    REAL,         INTENT(IN) :: fbed          ! fractional area of steambed area, m2/m2
+    REAL,         INTENT(IN) :: poros         ! porosity, m3/m3
+    REAL,         INTENT(IN) :: zbank         ! depth of streambed below ground surface, m 
+    REAL,         INTENT(IN) :: wsoi(nlayer)  ! water content in soil layers, m
+    REAL,         INTENT(IN) :: zl(nlayer)    ! depth of soil layer lower boundary, m
+    REAL,         INTENT(IN) :: zu(nlayer)    ! depth of soil layer upper boundary, m
+    REAL,         INTENT(OUT):: w_us_w        ! unsaturated soil water storage of soil column, m
+    REAL,         INTENT(OUT):: w_gw_w        ! groundwater storage of soil column, m
+    INTEGER,      INTENT(IN) :: i, j
+
+    INTEGER      :: k
+    REAL         :: wtmp
+
+    w_us_w = 0.
+    w_gw_w = 0.
+
+    ! unsaturated soil water storage for water column
+    ! groundwater storage for water column
+    if (zbank .ge. zhead) then
+       w_us_w = 0.
+       w_gw_w = max(0., zl(nlayer)-zbank) * poros * fbed
+    else
+       do k = 1, kwt - 1
+          w_us_w = w_us_w + wsoi(k) * fbed * max(0., max(zl(k),zbank)-max(zu(k),zbank))/(zl(k)-zu(k))
+       end do
+
+       k = kwt
+       if ((zbank .gt. zu(k)) .and. (zbank .lt. zl(k))) then
+          wtmp   = max(0., zl(k) - zhead) * poros
+          w_us_w = w_us_w + max(0., wsoi(k) - wtmp) * fbed * (zhead-zbank)/max(1.e-6,zhead-zu(k))
+          w_gw_w = w_gw_w + wtmp * fbed
+       else
+          wtmp   = max(0., zl(k) - zhead) * poros
+          w_us_w = w_us_w + max(0., wsoi(k) - wtmp) * fbed
+          w_gw_w = w_gw_w + wtmp * fbed 
+       endif
+
+       do k = kwt+1, nlayer
+          w_gw_w = w_gw_w + wsoi(k) * fbed
+       end do
+
+    endif
+
+  end subroutine water_storage_w
+
+! ---------------------------------------------------------------
+  subroutine update_gwhead_soil(did, dt)
+    implicit none
+
+    ! DESCRIPTION:
+    ! To update groundwater head and soil moisture based on CLM4 results 
+
+    INTEGER, INTENT(IN) :: did
+    REAL,    INTENT(IN) :: dt
+
+     ! rt2d(did)%ix                               ! RT_DOMAIN(did)%IXRT
+     ! rt2d(did)%jx                               ! RT_DOMAIN(did)%JXRT
+     ! nsoil = nlst_rt(did)%nsoil                 ! number of soil layer
+     ! rt2d(did)%dvolgw(ixrt,jxrt)                ! change of groundwater volume, m
+     ! rt2d(did)%hbeg(ixrt,jxrt)		  ! groundwater head at the end of last timestep, m
+     ! rt2d(did)%elev(ixrt,jxrt)                  ! hydrologic topography, m
+     ! rt2d(did)%zhead(ixrt,jxrt)                 ! depth of groundwater head, m
+     ! RT_DOMAIN(did)%SMCRT(ixrt,jxrt,nsoil)      ! liquid olumetric soil water content, m3/m3, mm3/mm3
+     ! RT_DOMAIN(did)%SICERT(ixrt,jxrt,nsoil)     ! iced volumetric water content, m3/m3, mm3/mm3
+     ! RT_DOMAIN(did)%SMCMAXRT(ixrt,jxrt,nsoil)   ! efficient porosity,  m3/m3, mm3/mm3 
+     ! RT_DOMAIN(did)%SOLDEPRT                    ! thickness of soil column, m
+     ! RT_DOMAIN(did)%SMCMAXRT(ixrt,jxrt,nsoil)   ! efficient porosity, m3/m3
+     ! RT_DOMAIN(did)%SMCSATRT(ixrt,jxrt)         ! porosity, m3/m3, mm3/mm3
+     ! RT_DOMAIN(did)%SUCSATRT(ixrt,jxrt)         ! saturated suction, m
+     ! RT_DOMAIN(did)%BSWRT(ixrt,jxrt)            ! Clapp and Hornberger 'b' 
+     ! nlst_rt(did)%zsoil8(nsoil)                 ! depth of center soil layer, m (negative)
+     ! nlst_rt(did)%dzsoil(nsoil)                 ! depth of soil layer thichkness, m
+
+     ! LOCAL VARIABLES
+     INTEGER      :: i, j, k
+     INTEGER      :: nsoil                               ! number of soil layer
+     REAL         :: zwt                                 ! depth of groundwater head at the beginning of timestep, m
+     REAL(kind=8) :: zhnew                               ! depth of groundwater head at the end of timestep, m
+     INTEGER      :: kwt0                                ! the layer in which groundwater head locates at the beginning of timestep
+     INTEGER      :: kwt1                                ! the layer in which groundwater head locates at the end of timestep
+     REAL, DIMENSION(nlst_rt(did)%nsoil+1)   :: zs       ! depth of soil layer center, m
+     REAL, DIMENSION(nlst_rt(did)%nsoil+1)   :: dz       ! thickness of soil layer, m
+     REAL, DIMENSION(nlst_rt(did)%nsoil+1)   :: zu       ! depth of upper interface of soil layer, m
+     REAL, DIMENSION(nlst_rt(did)%nsoil+1)   :: zl       ! depth of lower interface of soil layer, m
+     REAL, DIMENSION(nlst_rt(did)%nsoil)     :: smois    ! soil moisture, m3/m3
+     LOGICAL,DIMENSION(nlst_rt(did)%nsoil+1) :: if_cal   ! if calculate the water content using the curve    
+     LOGICAL,DIMENSION(nlst_rt(did)%nsoil+1) :: if_cal_bl! calculate the water content using water balance for this layer
+
+     REAL(kind=8), DIMENSION(nlst_rt(did)%nsoil+1)::wsoi ! water content of soil layers, m
+     REAL(kind=8) :: z1, z2, wmin, wmax, ww, dw, &
+                     w_rsat, ww_tmp
+     REAL(kind=8) :: wfix_gw                             ! water to fix groundwate head, Zhnew >= Zbot, m     
+     REAL         :: bsw, suction, poros, elev, &
+                     head, bot, zbed, fbed
+     REAL         :: w_us_s                              ! unsaturated soil water storage for non-streambed area (soil part), m
+     REAL         :: w_gw_s                              ! sasaturated soil water storage for non-streambed area (soil part), m
+     REAL         :: w_us_w                              ! unsaturated soil water storage for streambed area (water part), m
+     REAL         :: w_gw_w                              ! sasaturated soil water storage for streambed area (water part), m
+     INTEGER      :: k_cal_bl                            
+     REAL         :: w_us_wbeg, w_gw_wbeg                ! water storage for water part at the beginning of HYDRO timestep
+     REAL         :: wus_tmp
+
+     REAL, PARAMETER :: unit_convert = 1000. * 3600.     ! m/s -> mm/h
+
+     ! to reduce deviation
+     REAL(KIND=8), SAVE, ALLOCATABLE :: volaq_lastupdate(:,:)      
+     REAL(KIND=8)    :: dw_judge
+
+     ! variables for groundwater balance check
+     REAL(KIND=8)    :: w_ug_beg                         ! water storage for soil part at the beginning of HYDRO timestep
+     REAL(KIND=8)    :: w_ug_end                         ! water storage for soil part at the end of HYDRO timestep
+     REAL            :: error_gw_s, qgw_inout            ! error of groundwater budget for soil part
+
+     ! variables for unsaturated soil water & groundwater balance check
+     REAL            :: error_ug_s, qug_inout 
+     REAL(kind=8), SAVE, ALLOCATABLE :: w_ug_s0(:,:)     ! water storage for soil part at the beginning of timestep
+     
+     if (rt2d(did)%istep == 0) then
+        allocate(w_ug_s0(rt2d(did)%ix,rt2d(did)%jx))
+        allocate(volaq_lastupdate(rt2d(did)%ix,rt2d(did)%jx))
+        volaq_lastupdate = rt2d(did)%volaq(1:rt2d(did)%ix,1:rt2d(did)%jx)
+     endif
+
+     ! number of soil layer
+     nsoil  = nlst_rt(did)%nsoil 
+
+     ! depth of soil layer (center), zs
+     ! depth of soil layer thickness, dz
+     do k = 1, nsoil
+        zs(k) = abs(nlst_rt(did)%zsoil8(k))
+        dz(k) = nlst_rt(did)%dzsoil(k)
+     end do
+
+     ! depth of lower boundary of soil layer, zl
+     zl(1)   = dz(1)
+     do k = 2, nsoil 
+        zl(k) = zl(k-1) + dz(k)
+     end do
+
+     ! depth of upper boundary of soil layer, zu
+     zu(1)   = 0.
+     do k = 2, nsoil
+        zu(k)   = zl(k-1)
+     end do
+
+     do j = 1, rt2d(did)%jx
+       do i = 1, rt2d(did)%ix
+ 
+         w_rsat    = 0.
+         wfix_gw   = 0.d0
+         if_cal    = .FALSE.
+         if_cal_bl = .FALSE.
+         k_cal_bl  = 0
+
+         ! update groundwater head and soil moisture for land grids 
+         if ((rt2d(did)%ltype(i,j) == 1) .or. (rt2d(did)%ltype(i,j) == -1)) then
+
+           ! change of groundwater
+           dw  = DBLE(rt2d(did)%dvolgw(i,j))
+
+           ! state variables
+           elev    = rt2d(did)%elev(i,j)
+           head    = rt2d(did)%hbeg(i,j) 
+           bot     = rt2d(did)%bot(i,j)
+           fbed    = rt2d(did)%fbed(i,j)
+           zbed    = rt2d(did)%bank(i,j)
+
+           ! soil properties
+           bsw     = RT_DOMAIN(did)%BSWRT(i,j)
+           suction = RT_DOMAIN(did)%SUCSATRT(i,j)
+           poros   = RT_DOMAIN(did)%SMCSATRT(i,j)
+
+           ! depth of groundwater head below soil surface
+           zwt = max(0., rt2d(did)%zhead(i,j))
+
+           ! definition for layer nsoil+1, from zl(nsoil) to virtual groundwater bottom
+           zl(nsoil+1) = max(0., elev - bot) 
+           dz(nsoil+1) = zl(nsoil+1) - zl(nsoil) 
+           zu(nsoil+1) = zl(nsoil)
+           zs(nsoil+1) = zl(nsoil) + 0.5*dz(nsoil+1) 
+
+           ! kwt is the number of the soil layer in which groundwater head locates
+           kwt0 = nsoil + 1 
+           do k = nsoil, 1, -1
+              if ((zwt .ge. zu(k)) .and. (zwt .lt. zl(k))) then
+                 kwt0 = k
+                 exit
+              endif
+           end do
+
+           ! water content in soil layers at the beginning of HYDRO timestep
+           do k = 1, nsoil
+              wsoi(k) = DBLE(( RT_DOMAIN(did)%SMCRT(i,j,k)  + &
+                               RT_DOMAIN(did)%SICERT(i,j,k) ) * dz(k))
+           end do
+           k = nsoil+1
+           wsoi(k) = rt2d(did)%volaq(i,j)
+        
+           ! soil water storage for water column (streambed) at the beginning of timestep
+!           call water_storage_w(nsoil+1, kwt0, zwt, fbed, poros, zbed, REAL(wsoi), zl, zu, w_us_wbeg, w_gw_wbeg,i,j)
+
+           ! ----------------------------
+           ! BEGIN GROUNDWATER BALANCE
+           ! ----------------------------
+           ! w_ug_beg: soil water storage before update groundwater head at HYDRO timestep
+           ! w_ug_end: soil water storage after  update groundwater head at HYDRO timestep
+           ! (w_ug_end - w_ug_beg) & dvolgw
+           w_ug_beg = 0.d0
+           do k = 1, nsoil+1
+              w_ug_beg = w_ug_beg + wsoi(k)  
+           end do
+
+!IF (dw .ne. 0.0) THEN
+           ! ##############################################
+           ! update groundwater head & soil moisture
+           ! ##############################################
+           ! update 
+           k  = kwt0
+           ww = wsoi(k) + dw
+           z1 = DBLE(zu(k))                  ! depth of upper boundary
+           z2 = DBLE(zl(k))                  ! depth of lower boundary
+           wmax = DBLE(dz(k) * poros)
+
+           dw_judge = ww - volaq_lastupdate(i,j)   
+
+!IF ((kwt0 .lt. nsoil+1) .or. (dw_judge .ge. 1.D-6))THEN
+           do while(k .ge. 1 .and. k .le. nsoil+1) 
+
+              call gwhead2vol(wmin,     z2,    z1, z2, DBLE(bsw), DBLE(suction), DBLE(poros))
+
+              if ((ww .le. wmax) .and. (ww .ge. wmin)) then
+                 ! update groundwater head
+                 call vol2gwhead(zhnew, z1, z2, ww, DBLE(bsw), DBLE(suction), DBLE(poros))
+                 if_cal(k)    = .TRUE.
+                 if_cal_bl(k) = .TRUE.
+                 k_cal_bl     = k
+                 exit
+              elseif (ww .gt. wmax) then
+                 wsoi(k) = wmax  
+                 dw = ww - wmax
+                 if (k .eq. 1) then
+                    zhnew  = 0.d0                !gwhead(t+1) <= elev
+                    w_rsat = dw
+                    exit
+                 else               
+                    k  = k - 1
+                    ww = wsoi(k) + dw
+                    z1 = DBLE(zu(k))
+                    z2 = DBLE(zl(k)) 
+                    wmax = DBLE(dz(k) * poros)
+                 endif
+              elseif (ww .lt. wmin) then
+                 if (k .eq. nsoil+1) then
+                    zhnew   = DBLE(zl(k))        !gwhead(t+1) >= bot
+                    wsoi(k) = wmin
+                    wfix_gw = wmin - ww          !water to fix groundwater head, m 
+                    write(6,*) 'Warning: Groundwater Head < Aquifer Bottom: '
+                    write(6,*) 'ZWT1, ZBOT, i, j = ', zhnew, zl(k), i, j
+                    write(6,*) 'ZWT0, ZBOT, i, j = ', zwt, zl(k), i, j
+                    write(6,*) 'dvolgw,  sinfil, cgiflux, cglflux = ', &
+                               rt2d(did)%dvolgw(i,j), rt2d(did)%sinfil(i,j), &
+                               rt2d(did)%cgiflux(i,j), rt2d(did)%cglflux(i,j)
+                    exit 
+                 else
+                    if_cal(k) = .TRUE.
+                    k  = k + 1
+                    ww = ww + wsoi(k)
+                    z1 = z1
+                    z2 = DBLE(zl(k))
+
+                    wmax = wmax + DBLE(dz(k) * poros)   
+                 endif  
+              endif
+
+           end do
+
+           ! update soil water content for soil layers
+           ww_tmp = 0.d0
+           do k = 1, nsoil+1 
+              if (if_cal(k) .and. (k .ne. k_cal_bl)) then
+                 call gwhead2vol(wsoi(k), zhnew, DBLE(zu(k)), DBLE(zl(k)), DBLE(bsw), DBLE(suction), DBLE(poros))
+                 ww_tmp = ww_tmp + wsoi(k)
+              endif
+           end do
+
+           IF (k_cal_bl > 0) THEN
+              if (if_cal(k_cal_bl)) then
+                 k = k_cal_bl
+                 wsoi(k) = ww - ww_tmp
+              endif
+           ENDIF
+
+           volaq_lastupdate(i,j) = wsoi(nsoil+1)
+
+!ENDIF
+!ELSE
+!           wsoi(nsoil+1) = ww
+!           zhnew = DBLE(zwt) 
+!ENDIF
+
+           ! update water storage below bottom of last soil layer
+           rt2d(did)%volaq(i,j) = wsoi(nsoil+1)
+
+           ! update soil moisture for soil layers
+           do k = 1, nsoil
+              smois(k) =  REAL(wsoi(k)) / dz(k) 
+              RT_DOMAIN(did)%SICERT(i,j,k) = min(smois(k), RT_DOMAIN(did)%SICERT(i,j,k))
+              RT_DOMAIN(did)%SMCRT(i,j,k)  = max(0., smois(k) - RT_DOMAIN(did)%SICERT(i,j,k))
+           end do
+
+           ! ###############################################################
+           ! update unsaturated soil water storage and groundwater storage
+           ! ###############################################################
+           ! kwt is the number of the soil layer in which groundwater head locates
+           kwt1 = nsoil + 1
+           do k = nsoil, 1, -1
+              if ((REAL(zhnew) .ge. zu(k)) .and. (REAL(zhnew) .lt. zl(k))) then
+                 kwt1 = k
+                 exit
+              endif
+           end do
+
+           ! calculate unsaturated soil water storage & groundwater storage
+           k = nsoil + 1
+           wus_tmp = REAL(rt2d(did)%volaq(i,j)) - (zl(k)-max(REAL(zhnew),zu(k))) * poros
+           wus_tmp = max(0., wus_tmp)  ! unsaturated soil water above soil column
+
+!           calleater_storage_s(nsoil+1, kwt1, REAL(zhnew),  fbed, poros, zbed, REAL(wsoi), & 
+!                                wus_tmp,  zl,      zu,   w_us_s, w_gw_s)
+!           call water_storage_w(nsoil+1, kwt1, REAL(zhnew),  fbed, poros, zbed, REAL(wsoi), &
+!                                zl, zu, w_us_w, w_gw_w,i,j)
+
+           ! update unsaturated soil water & groundwater for whole grid cell
+           call water_storage_cal(nsoil+1, kwt1, REAL(zhnew), poros, REAL(wsoi), wus_tmp, &
+                                  zl,      zu,   rt2d(did)%w_us(i,j), rt2d(did)%w_gw(i,j))
+!           rt2d(did)%w_us(i,j) = w_us_s + w_us_w
+!           rt2d(did)%w_gw(i,j) = w_gw_s + w_gw_w
+
+           ! calculate rt2d(did)%cuiflux
+!           rt2d(did)%cuiflux(i,j) = (w_us_w + w_gw_w - w_us_wbeg - w_gw_wbeg) / dt  
+            rt2d(did)%cuiflux(i,j) = 0.  !!!Cong, 20190516,unknow
+ 
+           ! update groundwater head
+           rt2d(did)%zhead(i,j) = REAL(zhnew) 
+           rt2d(did)%hend(i,j)  = rt2d(did)%elev(i,j) - REAL(zhnew)
+           ! If head is close to (or above) elevation, i.e. in contact 
+           ! with lake water, set head as water level in lake 
+           ! or equal to elevation exactly if non-lake
+           if (rt2d(did)%hend(i,j)-rt2d(did)%elev(i,j) .ge. -1.E-3) then
+              rt2d(did)%hend(i,j) = max(rt2d(did)%hlake(i,j), &
+                                    min(rt2d(did)%elev(i,j), rt2d(did)%hend(i,j)))
+           endif
+
+           ! saturation excess runoff
+           rt2d(did)%rsat(i,j) = REAL(w_rsat)/dt    ! m/s
+!!           rt2d(did)%rsat(i,j) = 0.    ! m/s  Cong.test
+
+
+           ! ----------------------------
+           ! END GROUNDWATER BUDGET
+           ! END WATER BUDGET
+           ! ----------------------------
+           w_ug_end = 0.
+           do k = 1, nsoil+1
+              w_ug_end = w_ug_end + wsoi(k)
+           end do
+   
+           ! ----------------------------
+           ! GROUNDWATER BALANCE
+           ! ----------------------------
+           qgw_inout = rt2d(did)%sinfil(i,j) - rt2d(did)%rsat(i,j) + rt2d(did)%cglflux(i,j) + rt2d(did)%cgiflux(i,j)
+           if (nlst_rt(did)%gwBaseSwCRT .eq. 3) then
+              qgw_inout = qgw_inout + gw2d(did)%convgw(i,j)
+           endif
+           error_gw_s = (REAL(w_ug_end - w_ug_beg)/dt - qgw_inout + REAL(wfix_gw)/dt) * unit_convert
+
+           if (error_gw_s > 0.01) then
+              write(6,*) 'Error (mm/h) in Groundwater Budget: ', error_gw_s
+              write(6,*) '  I  ', '  J  ', '  END_WB  ', '  BEG_WB  ', '  W_INOUT  ', & 
+                         '  SINFIL  ',  '  RSAT  ',  '  cglflux  ', '  cgiflux  ', '  qfix_bot  '
+              write(6,*)  i, j, w_ug_end, w_ug_beg, qgw_inout*dt, rt2d(did)%sinfil(i,j), rt2d(did)%rsat(i,j), &
+                          rt2d(did)%cglflux(i,j), rt2d(did)%cgiflux(i,j), REAL(wfix_gw)/dt
+              if (nlst_rt(did)%gwBaseSwCRT .eq. 3) then
+                 write(6,*) 'CONVGW = ', gw2d(did)%convgw(i,j)
+              end if
+              stop 
+           endif
+
+           ! ----------------------------
+           ! WATER BALANCE 
+           ! ----------------------------
+           if (rt2d(did)%istep .gt. 0) then
+              qug_inout = (rt2d(did)%tinfil(i,j) - rt2d(did)%rsat(i,j) + rt2d(did)%cglflux(i,j)) + rt2d(did)%cgiflux(i,j) 
+              if (nlst_rt(did)%gwBaseSwCRT .eq. 3) then
+                 qug_inout = qug_inout + gw2d(did)%convgw(i,j)
+              endif
+              error_ug_s = (REAL(w_ug_end - w_ug_s0(i,j))/dt - qug_inout + REAL(wfix_gw)/dt) * unit_convert
+
+              if (error_ug_s > 0.01) then  
+                 write(6,*) 'Error (mm/h) in aquifer Water Budget: ', error_ug_s
+                 write(6,*) 'Error (mm/h) in Groundwater   Budget: ', error_gw_s
+                 write(6,*) '  I  ', '  J  ', '  END_WB  ', '  BEG_WB  ', '  W_INOUT  ', &
+                            '  TINFIL  ', '  RSAT  ', '  cglflux  ', '  cgiflux  ', ' ZWT_last  ', ' ZWT_this  ', '  qfix_bot  '
+                 write(6,*) i, j, w_ug_end, w_ug_s0(i,j), qug_inout*dt, rt2d(did)%tinfil(i,j), rt2d(did)%rsat(i,j), &
+                            rt2d(did)%cglflux(i,j), rt2d(did)%cgiflux(i,j), zwt, zhnew, REAL(wfix_gw)/dt
+                 if (nlst_rt(did)%gwBaseSwCRT .eq. 3) then
+                    write(6,*) 'CONVGW = ', gw2d(did)%convgw(i,j)
+                 endif
+              endif
+           endif
+
+           ! ----------------------------
+           ! BEGIN WATER BUDGET  
+           ! ----------------------------
+           ! w_ug_s0(i,j): soil water storage at the end of last LSM(HYDRO) time step
+           !               soil water storage at the beginning of this LSM timestep
+           ! w_ug_end:     soil water sorrage at the end of this LSM(HYDRO) time step
+           ! w_ug_end - w_ug_s0(i,j) & dw_soil 
+           w_ug_s0(i,j)  = w_ug_end 
+ 
+         else  ! ocean grids
+           rt2d(did)%hend(i,j)    = rt2d(did)%hbeg(i,j)
+           rt2d(did)%zhead(i,j)   = 0.
+           rt2d(did)%w_us(i,j)    = 0.
+           rt2d(did)%w_gw(i,j)    = rt2d(did)%w_gw(i,j)
+           rt2d(did)%cuiflux(i,j) = 0.
+           rt2d(did)%rsat(i,j)    = 0.
+
+           w_ug_s0(i,j)  = 0.d0 
+ 
+         endif
+
+         ! accumulated suturation excess runoff
+!         rt2d(did)%ac_rsat_grnd(i,j) = rt2d(did)%ac_rsat_grnd(i,j) + dt * &
+!                      (1. - rt2d(did)%fbed(i,j)) * rt2d(did)%rsat(i,j)
+         rt2d(did)%ac_rsat_grnd(i,j) = rt2d(did)%ac_rsat_grnd(i,j) + dt * rt2d(did)%rsat(i,j)
+         rt2d(did)%ac_cui(i,j)       = rt2d(did)%ac_cui(i,j) + dt * rt2d(did)%cuiflux(i,j)  !! Cong,20190516
+         rt2d(did)%ac_fixgw(i,j)     = rt2d(did)%ac_fixgw(i,j) + REAL(wfix_gw) * rt2d(did)%dx
+
+       end do
+     end do
+
+#ifdef MPP_LAND
+     call MPP_LAND_COM_REAL(rt2d(did)%hend, rt2d(did)%ix, rt2d(did)%jx, 99)
+#endif
+  end subroutine update_gwhead_soil
+
+! ---------------------------------------------------------------
+  subroutine gwhead2vol(wsoil, zhead, z1, z2, bsw, suction, poros)
+    implicit none
+
+    ! DESCRIPTION: 
+    ! this program is to calculate the water content of soil between
+    ! 'z1' and 'z2' based on the depth of groundwater head ('zhead')
+
+    REAL(kind=8), INTENT(OUT):: wsoil                   ! water content of soil between z1 and z1
+    REAL(kind=8), INTENT(IN) :: zhead                   ! depth of groundwater head
+    REAL(kind=8), INTENT(IN) :: z1, z2                  ! z1 <= z2
+    REAL(kind=8), INTENT(IN) :: bsw                     ! index parameter      
+    REAL(kind=8), INTENT(IN) :: suction                 ! suction
+    REAL(kind=8), INTENT(IN) :: poros                   ! porosity, m3/m3, mm3/mm3
+
+    ! LOCAL VARIABLES
+    REAL(kind=8), PARAMETER  :: theta_r = 0.1d0         ! residule water content, m3/m3, mm3/mm3
+    REAL(kind=8)             :: x1, x2, pow, vmax 
+
+    pow  = (bsw - 1.d0)/bsw                       ! 1- 1/b 
+    x1   = 1.d0 + max(0.d0, zhead - z1) / suction
+    x2   = 1.d0 + max(0.d0, zhead - z2) / suction
+    vmax = z2 - z1
+
+    wsoil = (vmax - (x1 - x2 - (x1**pow - x2**pow)/pow) &
+             * (1.d0 - theta_r) * suction ) * poros
+
+  end subroutine gwhead2vol
+
+! ---------------------------------------------------------------
+  subroutine vol2gwhead(zsolve, z1, z2, wsoil, bsw, suction, poros)
+  ! DESCRIPTION:
+  ! To calculate the depth of groundwater head based on three conditions 
+  ! (1) upper limit, z1
+  ! (2) lower limit, z2
+  ! (3) soil water amount between upper limit and lower limit, wsoil 
+
+    implicit none
+
+    REAL(kind=8), INTENT(OUT) :: zsolve
+    REAL(kind=8), INTENT(IN)  :: z1
+    REAL(kind=8), INTENT(IN)  :: z2
+    REAL(kind=8), INTENT(IN)  :: wsoil
+    REAL(kind=8), INTENT(IN)  :: bsw
+    REAL(kind=8), INTENT(IN)  :: suction
+    REAL(kind=8), INTENT(IN)  :: poros
+
+    ! LOCAL VARIABLES
+    REAL(kind=8), PARAMETER   :: theta_r = 0.1d0       ! residule water content, m3/m3 
+    INTEGER, PARAMETER:: iter_max = 100  
+    REAL              :: pow, vmax, rhs
+    REAL              :: za, za1, za2
+    REAL              :: x1, x2, y
+    INTEGER           :: iter
+
+    vmax = z2 - z1
+    pow  = (bsw - 1.)/bsw
+    rhs  = (vmax - wsoil/poros)/suction
+
+    za1  = z1
+    za2  = z2
+
+    do iter = 1, iter_max
+       za = 0.5d0 * (za1 + za2)
+ 
+       x1 = 1.d0 + max(0.d0, za - z1) / suction
+       x2 = 1.d0 + max(0.d0, za - z2) / suction
+       ! y = w_true - w_assume
+       y  = (1.d0 - theta_r) * (x1 - x2 - (x1**pow - x2**pow)/pow) - rhs 
+
+       ! find out the depth of groundwater head
+!       if ((za2-za1) .lt. 1.d-8) then
+       if ((za2-za1) .lt. 1.d-10) then 
+          zsolve = za
+          exit
+       endif
+    
+       ! iterations to search depth of groundwater head
+       ! according to wsoi 
+       if (y .lt. 0.d0) then
+          za1 = za 
+       else
+          za2 = za
+       endif 
+
+       ! reach maximum iteration number 
+       if (iter .eq. iter_max) then
+          zsolve = 0.5d0 * (za1 + za2)  
+       endif
+
+    end do
+
+  end subroutine vol2gwhead
+
+end module module_rt_rt2d

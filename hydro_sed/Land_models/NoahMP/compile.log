@@ -1,0 +1,100 @@
+(cd Utility_routines;		make)
+make[1]: Entering directory `/home/qxia/Documents/WRF_test/WRFV3/hydro/Land_models/NoahMP/Utility_routines'
+
+rm -f module_date_utilities.f
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -D_HRLDAS_OFFLINE_ module_date_utilities.F > module_date_utilities.f
+gfortran -o module_date_utilities.o -c -w -c -ffree-form -ffree-line-length-none -fconvert=big-endian -frecord-marker=4   module_date_utilities.f
+
+
+rm -f module_model_constants.f
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -D_HRLDAS_OFFLINE_ module_model_constants.F > module_model_constants.f
+gfortran -o module_model_constants.o -c -w -c -ffree-form -ffree-line-length-none -fconvert=big-endian -frecord-marker=4   module_model_constants.f
+
+
+rm -f module_wrf_utilities.f
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -D_HRLDAS_OFFLINE_ module_wrf_utilities.F > module_wrf_utilities.f
+gfortran -o module_wrf_utilities.o -c -w -c -ffree-form -ffree-line-length-none -fconvert=big-endian -frecord-marker=4   module_wrf_utilities.f
+
+
+rm -f kwm_string_utilities.f
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -D_HRLDAS_OFFLINE_ kwm_string_utilities.F > kwm_string_utilities.f
+gfortran -o kwm_string_utilities.o -c -w -c -ffree-form -ffree-line-length-none -fconvert=big-endian -frecord-marker=4   kwm_string_utilities.f
+
+make[1]: Leaving directory `/home/qxia/Documents/WRF_test/WRFV3/hydro/Land_models/NoahMP/Utility_routines'
+(cd Noah;			make)
+make[1]: Entering directory `/home/qxia/Documents/WRF_test/WRFV3/hydro/Land_models/NoahMP/Noah'
+
+rm -f module_sf_myjsfc.f
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -D_HRLDAS_OFFLINE_ module_sf_myjsfc.F > module_sf_myjsfc.f
+gfortran -o module_sf_myjsfc.o -c -I../Utility_routines -w -c -ffree-form -ffree-line-length-none -fconvert=big-endian -frecord-marker=4   module_sf_myjsfc.f
+
+
+rm -f module_sf_sfclay.f
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -D_HRLDAS_OFFLINE_ module_sf_sfclay.F > module_sf_sfclay.f
+gfortran -o module_sf_sfclay.o -c -I../Utility_routines -w -c -ffree-form -ffree-line-length-none -fconvert=big-endian -frecord-marker=4   module_sf_sfclay.f
+
+
+rm -f module_sf_noahmplsm.f
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -D_HRLDAS_OFFLINE_ module_sf_noahmplsm.F > module_sf_noahmplsm.f
+gfortran -o module_sf_noahmplsm.o -c -I../Utility_routines -w -c -ffree-form -ffree-line-length-none -fconvert=big-endian -frecord-marker=4   module_sf_noahmplsm.f
+
+
+rm -f module_sf_noahmp_glacier.f
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -D_HRLDAS_OFFLINE_ module_sf_noahmp_glacier.F > module_sf_noahmp_glacier.f
+gfortran -o module_sf_noahmp_glacier.o -c -I../Utility_routines -w -c -ffree-form -ffree-line-length-none -fconvert=big-endian -frecord-marker=4   module_sf_noahmp_glacier.f
+
+
+rm -f module_sf_noahmp_groundwater.f
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -D_HRLDAS_OFFLINE_ module_sf_noahmp_groundwater.F > module_sf_noahmp_groundwater.f
+gfortran -o module_sf_noahmp_groundwater.o -c -I../Utility_routines -w -c -ffree-form -ffree-line-length-none -fconvert=big-endian -frecord-marker=4   module_sf_noahmp_groundwater.f
+
+
+rm -f module_sf_noahmpdrv.f
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -D_HRLDAS_OFFLINE_ module_sf_noahmpdrv.F > module_sf_noahmpdrv.f
+gfortran -o module_sf_noahmpdrv.o -c -I../Utility_routines -w -c -ffree-form -ffree-line-length-none -fconvert=big-endian -frecord-marker=4   module_sf_noahmpdrv.f
+
+make[1]: Leaving directory `/home/qxia/Documents/WRF_test/WRFV3/hydro/Land_models/NoahMP/Noah'
+(cd IO_code;			make)
+make[1]: Entering directory `/home/qxia/Documents/WRF_test/WRFV3/hydro/Land_models/NoahMP/IO_code'
+
+rm -f module_hrldas_netcdf_io.f
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -D_HRLDAS_OFFLINE_  -I /home/qxia/local/paul_local/include module_hrldas_netcdf_io.F > module_hrldas_netcdf_io.f
+gfortran -o module_hrldas_netcdf_io.o -c -w -c -ffree-form -ffree-line-length-none -fconvert=big-endian -frecord-marker=4   -I ../MPP -I../Utility_routines -I /home/qxia/local/paul_local/include  module_hrldas_netcdf_io.f
+
+
+rm -f module_NoahMP_hrldas_driver.f
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -D_HRLDAS_OFFLINE_  module_NoahMP_hrldas_driver.F > module_NoahMP_hrldas_driver.f
+gfortran -o module_NoahMP_hrldas_driver.o -c -w -c -ffree-form -ffree-line-length-none -fconvert=big-endian -frecord-marker=4   -I./ -I../mod -I. \
+	-I../Noah -I../Utility_routines -I /home/qxia/local/paul_local/include module_NoahMP_hrldas_driver.f
+Warning: Nonexistent include directory "../mod"
+
+
+rm -f main_hrldas_driver.f
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -D_HRLDAS_OFFLINE_  main_hrldas_driver.F > main_hrldas_driver.f
+gfortran -o main_hrldas_driver.o -c -w -c -ffree-form -ffree-line-length-none -fconvert=big-endian -frecord-marker=4   -I ../MPP -I. \
+	-I../Noah -I../Utility_routines -I /home/qxia/local/paul_local/include main_hrldas_driver.f
+
+make[1]: Leaving directory `/home/qxia/Documents/WRF_test/WRFV3/hydro/Land_models/NoahMP/IO_code'
+(cd ../../CPL/NoahMP_cpl;       make)
+make[1]: Entering directory `/home/qxia/Documents/WRF_test/WRFV3/hydro/CPL/NoahMP_cpl'
+
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -I/home/qxia/local/paul_local/include module_hrldas_HYDRO.F > module_hrldas_HYDRO.f
+gfortran -o module_hrldas_HYDRO.o -w -c -ffree-form -ffree-line-length-none -fbounds-check -fconvert=big-endian -frecord-marker=4  -I./ -I ../../MPP -I ../../mod module_hrldas_HYDRO.f
+rm -f module_hrldas_HYDRO.f
+
+ar -r ../../lib/libHYDRO.a module_hrldas_HYDRO.o
+
+cpp -P -xassembler-with-cpp -traditional -I"../Data_Rec" -DHYDRO_D -DWRF_HYDRO -DWRFIO_NCD_LARGE_FILE_SUPPORT -I/home/qxia/local/paul_local/include hrldas_drv_HYDRO.F > hrldas_drv_HYDRO.f
+gfortran -o hrldas_drv_HYDRO.o -w -c -ffree-form -ffree-line-length-none -fbounds-check -fconvert=big-endian -frecord-marker=4  -I./ -I ../../MPP -I ../../mod hrldas_drv_HYDRO.f
+rm -f hrldas_drv_HYDRO.f
+
+ar -r ../../lib/libHYDRO.a hrldas_drv_HYDRO.o
+make[1]: Leaving directory `/home/qxia/Documents/WRF_test/WRFV3/hydro/CPL/NoahMP_cpl'
+(cd Run;			make -f Makefile all)
+make[1]: Entering directory `/home/qxia/Documents/WRF_test/WRFV3/hydro/Land_models/NoahMP/Run'
+
+echo "    -Wl,-rpath, -L -lhdf5 -lz"
+    -Wl,-rpath, -L -lhdf5 -lz
+gfortran -o Noah_hrldas_beta -I../IO_code -I../Noah ../IO_code/main_hrldas_driver.o ../IO_code/module_hrldas_netcdf_io.o ../Noah/module_sf_noahmpdrv.o ../Noah/module_sf_noahmplsm.o ../Noah/module_sf_noahmp_glacier.o ../Noah/module_sf_noahmp_groundwater.o ../Noah/module_sf_myjsfc.o ../Noah/module_sf_sfclay.o ../Utility_routines/module_wrf_utilities.o ../Utility_routines/module_model_constants.o ../Utility_routines/module_date_utilities.o ../Utility_routines/kwm_string_utilities.o ../../../CPL/NoahMP_cpl/hrldas_drv_HYDRO.o ../../../CPL/NoahMP_cpl/module_hrldas_HYDRO.o ../IO_code/module_NoahMP_hrldas_driver.o  -L../../../lib  -lHYDRO  -L/home/qxia/local/paul_local/lib -lnetcdff -lnetcdf 
+
+make[1]: Leaving directory `/home/qxia/Documents/WRF_test/WRFV3/hydro/Land_models/NoahMP/Run'

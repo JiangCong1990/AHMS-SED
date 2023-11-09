@@ -1,0 +1,120 @@
+&NOAHLSM_OFFLINE
+! directory of output files
+  OUTDIR = '/scratch/cjiang/NOAHMP_OUT/NOAHMP_OUT_20km_hydro_test70'
+
+! directory of geo-data
+! providing geo info., projection info., XLAND, SEAICE, HGT, TMN, LANDUSE, SOILTYPE
+  HRLDAS_CONSTANTS_FILE = "/home/cjiang1/NOAHMP_IN/Loess_Plateau_20km/wrfinput/wrfinput_d01"
+
+! directory of inputed meteorological forcing data
+! INDIR  = '/scratch/cjiang/hourly_ERA5_data_20km_ocean/'
+  INDIR  = '/scratch/cjiang/hourly_CMFD_data_20km_ocean_MOD'
+! INDIR  = '/scratch/cjiang/3hourly_GDPP_CMIP'
+
+! for extract greenfrac
+  GEO_STATIC_FLNM = "/home/cjiang1/NOAHMP_IN/Loess_Plateau_20km/geo_em.d01.nc"
+
+!irrigation option
+! **0 -> No irrigation
+!   1 -> Irrigation ON
+!   2 -> irrigation trigger based on crop season Planting and harvesting dates
+!  *3 -> irrigation trigger based on LAI threshold
+ irrigation_option = 3
+
+!irrigation method option
+! **0 -> method based on geo_em fractions
+!   1 -> sprinkler method
+!   2 -> micro/drip irrigation
+!   3 -> surface flooding
+ irrigation_method_option = 3
+
+!soil erosion option
+ erosion_option = 1
+
+! MMF_RUNOFF_FILE = "/raid/weiyu/HRLDAS_V3.5_wrk/data/wrfleafxyz_d01.nc"
+
+! Starting time for simulate
+  START_YEAR   = 1979
+  START_MONTH  = 01
+  START_DAY    = 01
+  START_HOUR   = 00
+  START_MIN    = 00
+
+! restart file for restart run
+! RESTART_FILENAME_REQUESTED  = '/home/cjiang1/NOAHMP_IN/Loess_Plateau/RESTART.1983010100_DOMAIN1'
+
+! total simulation time
+  KDAY  = 3655 !367 !3655
+!  KHOUR = 0
+
+! interval (second) 
+  FORCING_TIMESTEP = 10800
+  NOAH_TIMESTEP    = 3600
+  OUTPUT_TIMESTEP  = 86400
+
+! interval for RESTART output (hour)
+  RESTART_FREQUENCY_HOURS = 720 !240
+
+! options in WRF &noah_mp
+! options for Noah_MP
+! dveg 
+  DYNAMIC_VEG_OPTION                = 4
+! opt_crs 
+  CANOPY_STOMATAL_RESISTANCE_OPTION = 1
+! opt_sfc
+  SURFACE_DRAG_OPTION               = 1
+! opt_btr
+  BTR_OPTION                        = 1
+! opt_run
+  RUNOFF_OPTION                     = 9
+! opt_frz
+  SUPERCOOLED_WATER_OPTION          = 1
+! opt_inf 
+  FROZEN_SOIL_OPTION                = 1
+! opt_rad
+  RADIATIVE_TRANSFER_OPTION         = 3
+! opt_alb
+  SNOW_ALBEDO_OPTION                = 2
+! opt_snf
+  PCP_PARTITION_OPTION              = 1
+! opt_tbot !!Cong, options for lower boundary condition of soil temperature read from a file
+  TBOT_OPTION                       = 2
+! opt_stc
+  TEMP_TIME_SCHEME_OPTION           = 1
+
+! Split output after split_output_count output times.
+ SPLIT_OUTPUT_COUNT = 1
+
+ NSOIL=4
+ soil_thick_input(1) = 0.10
+ soil_thick_input(2) = 0.30
+ soil_thick_input(3) = 0.60
+ soil_thick_input(4) = 1.00
+
+! ZLVL = 15.0
+ ZLVL = 10.0
+
+! Specification of forcing data:  
+! 1 = HRLDAS-hour format,
+! 2 = HRLDAS-min format, 
+! 3 = WRF (wrfout_*), 
+! 4 = Idealized, 
+! 5 = Ideal w/ Spec. Precip., 
+! 6 = HRLDAS-hrl y format w/ Spec. Precip,
+! 7 = WRF w/Spec. Precip
+ FORC_TYP = 1
+
+
+!HRLDAS_ini_typ 
+!1: initial and parameters from frocing; 
+!0: from wrfinput, given as HRLDAS_CONSTANTS_FILE
+ HRLDAS_ini_typ = 0
+
+!!!!Cong,2019.04 
+ SNOW_assim = 0
+
+/
+
+&URBAN_OFFLINE
+ UCMCALL = 0
+ ZLVL_URBAN /

@@ -1,0 +1,212 @@
+3378,3382c3378,3379
+<                              fbed,topo,  irg,               sabs, ac_precevap,&
+<                              ac_irgrw,   ac_irggw,            veloc,          &
+<                              qsKR,       NumFracts,         SusSed,    DepSed,&
+<                              ErodSed,    SedFlux,        t_SedFlux,      qsEH,&
+<                              SedConc,    T_SedConc)
+---
+>                              fbed,topo,irg,sabs,ac_precevap,ac_irgrw,ac_irggw,&
+>                              veloc)
+3394d3390
+<     integer,  intent(in)                       :: NumFracts
+3413,3419d3408
+<     !
+<     real,     intent(in), OPTIONAL, dimension(ixrt,jxrt) :: qsKR
+<     real,     intent(in), OPTIONAL, dimension(ixrt,jxrt) :: T_SedConc
+<     real,     intent(in), OPTIONAL, dimension(ixrt,jxrt) :: t_SedFlux
+<     real,     intent(in), OPTIONAL, dimension(NumFracts,ixrt,jxrt) :: &
+<                                              qsEH,SusSed,DepSed,ErodSed,SedFlux,SedConc
+< 
+3461c3450
+<     integer :: iret, dimid_soil, i,j,ii,jj, dimid_sFracts
+---
+>     integer :: iret, dimid_soil, i,j,ii,jj
+3782,3783d3770
+<        !C.Jiang, add to output sediment variable
+<        iret = nf_def_dim(ncid, "numfracts", NumFracts, dimid_sFracts)  !-- 3 soil fraction
+3986,4048d3972
+< !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+<        if(present(qsKR)) then
+<        iret = nf_def_var(ncid,"qsKR",NF_FLOAT, 3,(/dimid_ix,dimid_jx,dimid_times/), varid)
+<        iret = nf_put_att_text(ncid,varid,'units',3,'m^3')
+<        iret = nf_put_att_text(ncid,varid,'long_name',58,'sediment transport capacity,total volume using KR equation')
+<        iret = nf_put_att_text(ncid,varid,'coordinates',3,'x y')
+<        iret = nf_put_att_text(ncid,varid,'grid_mapping',23,'lambert_conformal_conic')
+<        iret = nf_put_att_real(ncid,varid,'missing_value',NF_REAL,1,-9E15)
+<        endif
+< 
+<        if(present(qsEH)) then
+<        iret = nf_def_var(ncid,"qsEH",NF_FLOAT,4,(/dimid_sFracts,dimid_ix,dimid_jx,dimid_times/), varid)
+<        iret = nf_put_att_text(ncid,varid,'units',3,'m^3')
+<        iret = nf_put_att_text(ncid,varid,'long_name',58,'sediment transport capacity,total volume using EH equation')
+<        iret = nf_put_att_text(ncid,varid,'coordinates',4,'numfracts x y')
+<        iret = nf_put_att_text(ncid,varid,'grid_mapping',23,'lambert_conformal_conic')
+<        iret = nf_put_att_real(ncid,varid,'missing_value',NF_REAL,1,-9E15)
+<        endif
+< 
+<        if(present(T_SedConc)) then
+<        iret = nf_def_var(ncid,"T_SedConc",NF_FLOAT,3,(/dimid_ix,dimid_jx,dimid_times/),varid)
+<        iret = nf_put_att_text(ncid,varid,'units',4,'m2/s')
+<        iret = nf_put_att_text(ncid,varid,'long_name',20,'Total sediment concentration')
+<        iret = nf_put_att_text(ncid,varid,'coordinates',3,'x y')
+<        iret = nf_put_att_text(ncid,varid,'grid_mapping',23,'lambert_conformal_conic')
+<        iret = nf_put_att_real(ncid,varid,'missing_value',NF_REAL,1,-9E15)
+<        endif
+< 
+<        if(present(SedConc)) then
+<        iret = nf_def_var(ncid,"SedConc",NF_FLOAT,4,(/dimid_sFracts,dimid_ix,dimid_jx,dimid_times/),varid)
+<        iret = nf_put_att_text(ncid,varid,'units',4,'m2/s')
+<        iret = nf_put_att_text(ncid,varid,'long_name',20,'sediment concentraion')
+<        iret = nf_put_att_text(ncid,varid,'coordinates',13,'numfracts x y')
+<        iret = nf_put_att_text(ncid,varid,'grid_mapping',23,'lambert_conformal_conic')
+<        iret = nf_put_att_real(ncid,varid,'missing_value',NF_REAL,1,-9E15)
+<        endif
+< 
+<        if(present(SusSed)) then
+<        iret = nf_def_var(ncid,"SusSed",NF_FLOAT,4,(/dimid_sFracts,dimid_ix,dimid_jx,dimid_times/), varid)
+<        iret = nf_put_att_text(ncid,varid,'units',4,'m2/s')
+<        iret = nf_put_att_text(ncid,varid,'long_name',20,'Suspended seidment')
+<        iret = nf_put_att_text(ncid,varid,'coordinates',13,'numfracts x y')
+<        iret = nf_put_att_text(ncid,varid,'grid_mapping',23,'lambert_conformal_conic')
+<        iret = nf_put_att_real(ncid,varid,'missing_value',NF_REAL,1,-9E15)
+<        endif
+< 
+<        if(present(DepSed)) then
+<        iret = nf_def_var(ncid,"DepSed",NF_FLOAT,4,(/dimid_sFracts,dimid_ix,dimid_jx,dimid_times/), varid)
+<        iret = nf_put_att_text(ncid,varid,'units',4,'m2/s')
+<        iret = nf_put_att_text(ncid,varid,'long_name',20,'Deposited seidment')
+<        iret = nf_put_att_text(ncid,varid,'coordinates',13,'numfracts x y')
+<        iret = nf_put_att_text(ncid,varid,'grid_mapping',23,'lambert_conformal_conic')
+<        iret = nf_put_att_real(ncid,varid,'missing_value',NF_REAL,1,-9E15)
+<        endif
+< 
+<        if(present(ErodSed)) then
+<        iret = nf_def_var(ncid,"ErodSed",NF_FLOAT,4,(/dimid_sFracts,dimid_ix,dimid_jx,dimid_times/), varid)
+<        iret = nf_put_att_text(ncid,varid,'units',4,'m2/s')
+<        iret = nf_put_att_text(ncid,varid,'long_name',20,'Eroded seidment')
+<        iret = nf_put_att_text(ncid,varid,'coordinates',13,'numfracts x y')
+<        iret = nf_put_att_text(ncid,varid,'grid_mapping',23,'lambert_conformal_conic')
+<        iret = nf_put_att_real(ncid,varid,'missing_value',NF_REAL,1,-9E15)
+<        endif
+4050,4058d3973
+<        if(present(t_SedFlux)) then
+<        iret = nf_def_var(ncid,"t_SedFlux",NF_FLOAT,3,(/dimid_ix,dimid_jx,dimid_times/), varid)
+<        iret = nf_put_att_text(ncid,varid,'units',4,'m2/s')
+<        iret = nf_put_att_text(ncid,varid,'long_name',20,'Total Sediment Flux')
+<        iret = nf_put_att_text(ncid,varid,'coordinates',3,'x y')
+<        iret = nf_put_att_text(ncid,varid,'grid_mapping',23,'lambert_conformal_conic')
+<        iret = nf_put_att_real(ncid,varid,'missing_value',NF_REAL,1,-9E15)
+<        endif
+< !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+4492,4602d4406
+< !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+<     if (present(qsKR)) then
+< #ifdef MPP_LAND
+<      xdumd = gqsKR
+< #else
+<      xdumd = qsKR
+< #endif
+<      iret = nf_inq_varid(ncid, "qsKR", varid)
+<      iret = nf_put_vara_real(ncid, varid, (/1,1,output_count/),(/ixrtd,jxrtd,1/), xdumd)
+<     endif
+< 
+< 
+<     if (present(T_SedConc)) then
+< #ifdef MPP_LAND
+<      xdumd = gT_SedConc
+< #else
+<      xdumd = T_SedConc
+< #endif
+<      iret = nf_inq_varid(ncid, "T_SedConc", varid)
+<      iret = nf_put_vara_real(ncid, varid,(/1,1,output_count/),(/ixrtd,jxrtd,1/), xdumd)
+<     endif
+< 
+<     !-- 3-d soil numFracts
+<     if (present(SedConc)) then
+<       do n = 1, NumFracts
+< #ifdef MPP_LAND
+<      xdumd = gSedConc(n,:,:)
+< #else
+<      xdumd = SedConc(n,:,:)
+< #endif
+<      iret = nf_inq_varid(ncid, "SedConc", varid)
+<      iret = nf_put_vara_real(ncid,varid,(/n,1,1,output_count/),(/1,ixrtd,jxrtd,1/), xdumd)
+<       enddo !-n soil numFracts
+<     endif
+< 
+<     !-- 3-d soil numFracts
+<     if (present(qsEH)) then
+<       do n = 1, NumFracts
+< #ifdef MPP_LAND
+<      xdumd = gqsEH(n,:,:)
+< #else
+<      xdumd = qsEH(n,:,:)
+< #endif
+<      iret = nf_inq_varid(ncid, "qsEH", varid)
+<      iret = nf_put_vara_real(ncid,varid,(/n,1,1,output_count/),(/1,ixrtd,jxrtd,1/), xdumd)
+<       enddo !-n soil numFracts
+<     endif
+< 
+<     !-- 3-d soil numFracts
+<     if (present(SusSed)) then
+<       do n = 1, NumFracts
+< #ifdef MPP_LAND
+<      xdumd = gSusSed(n,:,:)
+< #else
+<      xdumd = SusSed(n,:,:)
+< #endif
+<      iret = nf_inq_varid(ncid, "SusSed", varid)
+<      iret = nf_put_vara_real(ncid, varid,(/n,1,1,output_count/),(/1,ixrtd,jxrtd,1/), xdumd)
+<       enddo !-n soil numFracts
+<     endif
+< 
+<     !--3-d soil numFracts
+<     if (present(DepSed)) then
+<       do n = 1, NumFracts
+< #ifdef MPP_LAND
+<      xdumd = gDepSed(n,:,:)
+< #else
+<      xdumd = DepSed(n,:,:)
+< #endif
+<      iret = nf_inq_varid(ncid, "DepSed", varid)
+<      iret = nf_put_vara_real(ncid, varid,(/n,1,1,output_count/),(/1,ixrtd,jxrtd,1/),xdumd)
+<       enddo !-n soil numFracts
+<     endif
+< 
+<     !--3-d soil numFracts
+<     if (present(ErodSed)) then
+<       do n = 1, NumFracts
+< #ifdef MPP_LAND
+<      xdumd = gErodSed(n,:,:)
+< #else
+<      xdumd = ErodSed(n,:,:)
+< #endif
+<      iret = nf_inq_varid(ncid, "ErodSed", varid)
+<      iret = nf_put_vara_real(ncid,varid,(/n,1,1,output_count/),(/1,ixrtd,jxrtd,1/),xdumd)
+<       enddo !-n soil numFracts
+<     endif
+< 
+<     !--3-d soil numFracts
+<     if (present(SedFlux)) then
+<       do n = 1, NumFracts
+< #ifdef MPP_LAND
+<      xdumd = gSedFlux(n,:,:)
+< #else
+<      xdumd = SedFlux(n,:,:)
+< #endif
+<      iret = nf_inq_varid(ncid, "SedFlux", varid)
+<      iret = nf_put_vara_real(ncid,varid,(/n,1,1,output_count/),(/1,ixrtd,jxrtd,1/),xdumd)
+<       enddo !-n soil numFracts
+<     endif
+< 
+<     if (present(t_SedFlux)) then
+< #ifdef MPP_LAND
+<      xdumd = gt_SedFlux
+< #else
+<      xdumd = t_SedFlux
+< #endif
+<      iret = nf_inq_varid(ncid, "t_SedFlux", varid)
+<      iret = nf_put_vara_real(ncid,varid,(/1,1,output_count/),(/ixrtd,jxrtd,1/),xdumd)
+<     endif
+< !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+< 

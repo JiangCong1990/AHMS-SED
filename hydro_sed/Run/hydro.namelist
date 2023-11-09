@@ -1,0 +1,152 @@
+&HYDRO_nlist
+
+!!!! SYSTEM COUPLING !!!!
+!Specify what is being coupled:  1=HRLDAS (offline Noah-LSM), 2=WRF, 3=NASA/LIS, 4=CLM
+ sys_cpl = 1
+
+!!!! MODEL INPUT DATA FILES !!!!
+!Specify land surface model gridded input data file...(e.g.: "geo_em.d03.nc")
+ GEO_STATIC_FLNM = "/home/cjiang1/NOAHMP_IN/Loess_Plateau_20km/geo_em.d01.nc"
+
+!Specify the high-resolution routing terrain HYDRO input data file2...(e.g.: "Fulldom_hires_hydrofile.nc"
+ GEO_FINEGRID_FLNM = "/home/cjiang1/NOAHMP_IN/Loess_Plateau_20km/geo_em.d01.nc" 
+
+!Specify the name of the restart file if starting from restart...comment out with '!' if not...
+ RESTART_FILE  = '/home/cjiang1/NOAHMP_IN/Loess_Plateau_20km/HYDRO_RST_d1_202208'
+
+!Specify the name of hydro input data file IF GWBASESWCRT == 3 OR OVCHRTSWCRT == 1  
+!To characterize surface (OVCHRTSWCRT == 1) and subsurface (GWBASESWCRT == 3) hydrological conditions
+ RT2D_FLNM = "/home/cjiang1/NOAHMP_IN/Loess_Plateau_20km/hydro_input_merit.nc"
+
+!!!! MODEL OUTPUT DATA FILES !!!!
+!Specify output name for restart file
+ RESTART_OUTNAME = "/scratch/cjiang/NOAHMP_OUT/NOAHMP_OUT_20km_hydro_test70/HYDRO_RST_d"
+
+!Specify output name for 2D Groundwater Routing model
+ GW2D_OUTNAME = "/scratch/cjiang/NOAHMP_OUT/NOAHMP_OUT_20km_hydro_test70/HYDRO_OUT_GW2D_d" 
+
+!Specify output name for 2D Overland+Channel Routing model 
+ RT2D_OUTNAME = "/scratch/cjiang/NOAHMP_OUT/NOAHMP_OUT_20km_hydro_test70/HYDRO_OUT_RT2D_d"
+
+!!!! MODEL SETUP AND I/O CONTROL !!!!
+!Specify the domain or nest number identifier...(integer)
+ IGRID = 1
+
+!Specify write frequency for restart file...(minutes)
+!default: monthly when rst_dt <= 0
+! rst_dt = 1440     
+ rst_dt = 0
+
+!Specify write frequency for output file...(minutes)
+!  out_dt = 60 
+ out_dt = 1440
+
+!Specify the number of output times to be contained within each output history file...(integer)
+!   SET = 1 WHEN RUNNING CHANNEL ROUTING ONLY/CALIBRATION SIMS!!!
+!   SET = 1 WHEN RUNNING COUPLED TO WRF!!!
+ SPLIT_OUTPUT_COUNT = 1
+
+!Restart switch to set restart accumulation variables = 0(0-no reset, 1-yes reset to 0.0)
+ RSTRT_SWC = 0
+
+!Switch to overwrite the soil variables form routing restart file(0=no, 1=yes) 
+ rst_typ = 1
+
+!Switch to readin restart file (0=no, 1=yes)
+ rst_bi_in = 1
+
+!Specify format for output restart file(0 = netcdf(default), 1 = binary) 
+ rst_bi_out = 0 
+
+!Switch to output   
+ CHRTOUT_DOMAIN = 0           ! Netcdf point timeseries output at all channel points
+ CHRTOUT_GRID   = 0           ! Netcdf grid of channel streamflow values
+ LSMOUT_DOMAN   = 0           ! Netcdf grid of variables passed between LSM and routing components
+ RTOUT_DOMAIN   = 0           ! Netcdf grid of terrain routing variables on routing grid
+ output_gw      = 0           ! Netcdf grid of GW
+ outlake        = 0           ! Netcdf grid of lake
+ output_rt2d    = 1           ! Netcdf grid of rt2d
+
+!Specify the minimum stream order to output to netcdf point file...(integer)
+!Note: lower value of stream order produces more output.
+ order_to_write = 1
+
+!!!! PHYSICS OPTIONS AND RELATED SETTINGS !!!!
+!Switch for terrain adjustment of incoming solar radiation: 0=no, 1=yes
+!Note: This option is not yet active in Verion 1.0...
+!      WRF has this capability so be careful not to double apply the correction!!!
+ TERADJ_SOLAR = 0
+
+!Specify the grid spacing of the HYDRO routing grid...(meters)
+ DXRT = 20000
+
+!Specify the integer multiple between the land model grid and the terrain routing grid...(integer)
+ AGGFACTRT = 1
+
+!Specify the HYDRO routing model timestep...(seconds)
+ DTRT = 3600
+
+!Specify subsurface & overland Routing Option: 1=Seepest Descent (D8) 2=CASC2D
+ rt_option   = 0
+
+!Switch to activate interaction of groundwater and surface water...(0=no, 1=yes)!!!Cong,20190505
+ INTERGWSFW = 1
+
+!Switch to activate 2D Terrestrial Hydrologic module ... (0=no, 1=yes) 
+!including 2D overland & channel routing
+ OVCHRTSWCRT = 1
+
+!Specify numerical mothod when OVCHRTSWCRT = 1: 1=shepherd, 2=matinv, 3=sparse  
+ OVERCHANRT_METHOD = 3
+
+!Specify the timestep interval of 2D Terrestrial Hydrologic module... (seconds)
+!N * DT_2DTHRT = DTRT, N = 0, 1, 2, ......
+ DT_2DTHRT = 3600
+
+!CASC2D-SED Erosion and Sediment Routing option index: 1=MUSLE; 2=USLE, 3=USLE-MM, 4=KR; 0= no erosion)
+ 
+ indexeros = 2
+
+ e1 = 38.0
+
+ e2 = 1.25
+  
+ e3 = 1.0
+
+ alpha = 0.3
+
+ notillf = 0.25
+
+! Maximum number of size fractions found any of the soil types defined in the soil
+! type input grid
+ NumFracts = 3 
+
+!Specify number of cross-section
+!Specify coordinates of cross-section(s) in transects.input 
+ num_transect = 8
+
+!Specify interval for averaging-streamflow (sec.)
+!=3600s, hourly streamflow of specified transects
+!=86400s, daily streamflow of specified transects
+ dt_flowtran = 86400   
+
+!Switch to activate baseflow bucket model...(0=none, 1=exp. bucket, 2=pass-through, 3=2D routing)
+ GWBASESWCRT = 3 
+
+!Specify baseflow/bucket model initialization...(0=cold start from table, 1=restart file)
+ GW_RESTART = 0
+
+!Specify the pre-cycle number of groundwater spinup (2000)!!cong
+ GwPreCycles = 2000 ! 17520000 ! 17520000
+
+ GwPreDiag=false
+
+ GwPreDiagInterval=8760
+
+!Irrigation module
+! 1: river irrgation and groundwater irrigation
+! 1: river irrigation only;
+! 2: groundwater irrigation only;
+! 3: river irrigation and groundwater irrigation
+ IRRIG_OPTION = 1
+/

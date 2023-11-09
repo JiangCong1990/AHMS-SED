@@ -1,0 +1,14 @@
+	6 	subbasins
+        ==========================================================================================================================================
+	NO		streambed	hydraulic_conductivity	hydraulic_conductivity	Manning coefficient	Manning coefficient
+	subbasin	thickness	inside stream cgi	outside stream cui	inside stream		outside stream (not used now)
+        used when	INTERGWSFW==1	INTERGWSFW==1		INTERGWSFW==1		OVCHRTSWCRT==1		OVCHRTSWCRT==1 						
+        ==========================================================================================================================================
+	0,		100.0,		1.E-7,			1.E-7,			0.025,			0.025,				! ocean girds
+	1,		1.0,		1.E-7,			1.E-7,			0.025,			0.025,				! subbasin == 1, specified in hydro_basin.nc  !Cong  Manning (0.025,0.35)Hydr(1.E-5) 
+	2,		1.0,		1.E-8,			5.E-8,			0.025,			0.025,				! subbasin == 2, specified in hydro_basin.nc, Tangnaihe
+	3,		1.0,		1.E-7,			5.E-8,			0.025,			0.025,				! subbasin == 3, specified in hydro_basin.nc, Lanzhou
+	4,		1.0,		1.E-7,			5.E-8,			0.01,			0.025,				! subbasin == 4, specified in hydro_basin.nc, Tongdaoguai	
+        5,              1.0,            1.E-7,                  5.E-8,                  0.01,                   0.025,                           ! subbasin == 5, specified in hydro_basin.nc, Huayuankou
+        6,              1.0,            1.E-7,                  5.E-8,                  0.01,                   0.025,                           ! subbasin == 5, specified in hydro_basin.nc, Huayuankou
+
