@@ -5409,7 +5409,7 @@ end subroutine RoutSedOvrl
     REAL                      :: Pusle             ! conservation practice factor in USLE
     INTEGER, PARAMETER:: KRcoeff = 58390
     INTEGER, PARAMETER:: rmax = 1000
-    REAL, PARAMETER :: n = 0.025                   ! Manning Roughnes Coefficient 
+    REAL                      :: n                 ! Surface Manning roughnes coefficient 
     REAL                      :: NoTillFactor      ! no tillage factor, Wilkinson and McElroy (2007)
     REAL                      :: E, & ! 
                                  I30, & !
@@ -5432,7 +5432,25 @@ end subroutine RoutSedOvrl
        e3=nlst_rt(did)%e3
 
        alpha=nlst_rt(did)%alpha
+
        NoTillFactor=nlst_rt(did)%notillf
+
+       ! Finds land use for the outgoing overland cell
+
+       LandUse =  rt_domain(did)%VEGTYP(jfrom,kfrom)
+       IRRFRA = rt2d(did)%IRFRACT(jfrom,kfrom)
+       
+       ! read from HYDRO TABLE
+       ! Might be related to vegetables and gully in the future
+
+       n = RT_DOMAIN(did)%OV_ROUGH(LandUse) 
+
+       ! unit discharge (per width) m2/s, q=vh 
+       ! Manning equation
+
+       UnitDischarge=1./n*(RUNSRF*dt)**(2./3.)*S0**(0.5)*(RUNSRF*dt)
+
+       FBARE = exp(-0.52*rt2d(did)%LAI(jfrom,kfrom))
         
        ! Brown and Foster's equation was used for the calculation of rainfall
        ! kinetic energy
@@ -5466,21 +5484,13 @@ end subroutine RoutSedOvrl
 
 !       endif
 
-        ! UnitDischarge = abs(discharge/width)
-!        UnitDischarge = abs(discharge/dx)
-        UnitDischarge=1./n*(RUNSRF*dt)**(2./3.)*S0**(0.5)*dx
-!        SoilType = isoil[jfrom][kfrom];
-!        LandUse = iman[jfrom][kfrom];
+!       UnitDischarge = abs(discharge/dx)
 
-    ! Finds soil type and land use for the outgoing overland cell
+    ! Finds soil type for the outgoing overland cell
 
 !        SoilType = rt_domain(did)%SOILTYP(jfrom,kfrom)
-!        LandUse =  rt_domain(did)%VEGTYP(jfrom,kfrom)
-!        Cusle =    rt_domain(did)%cfactor(LandUse)
-        
-        FBARE = exp(-0.52*rt2d(did)%LAI(jfrom,kfrom))
+!        Cusle =    rt_domain(did)%cfactor(LandUse)      
 
-        IRRFRA = rt2d(did)%IRFRACT(jfrom,kfrom)
        
 !!        Cusle = max(min((1.0-IRRFRA)*FBARE*NoTillFactor+IRRFRA*FBARE,1.0),0.0)
  
